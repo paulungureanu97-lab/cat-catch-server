@@ -1,0 +1,14 @@
+{
+  "name": "cat-catch-server",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Cat Catch multiplayer relay/presence server (protocol v2)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
