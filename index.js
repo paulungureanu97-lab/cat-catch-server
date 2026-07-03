@@ -59,8 +59,9 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server: httpServer });
 httpServer.listen(PORT, '0.0.0.0');
 
-/** name -> ws */
+/** lowercased name -> ws (matching is case-insensitive, display keeps casing) */
 const clients = new Map();
+const keyOf = (name) => String(name || '').trim().toLowerCase();
 
 function send(ws, type, payload = {}) {
   if (!ws || ws.readyState !== ws.OPEN) return;
@@ -75,12 +76,13 @@ function publicProfile(ws) {
   return { avatar: ws.avatar || '', bio: ws.bio || '' };
 }
 
-function notifyWatchers(name, online) {
-  const who = clients.get(name);
+function notifyWatchers(nameKey, online) {
+  const who = clients.get(nameKey);
   for (const ws of clients.values()) {
-    if (ws.watching && ws.watching.has(name)) {
+    if (ws.watching && ws.watching.has(nameKey)) {
       send(ws, online ? 'friend-online' : 'friend-offline', {
-        name,
+        // reply with the spelling THIS watcher used, so their list matches
+        name: ws.watching.get(nameKey),
         ...(online && who ? publicProfile(who) : {}),
       });
     }
@@ -107,53 +109,72 @@ wss.on('connection', (ws) => {
         }
         const name = String(msg.name || '').trim().slice(0, 20);
         if (!name) return send(ws, 'hello-error', { reason: 'empty-name' });
-        if (clients.has(name) && clients.get(name) !== ws) {
+        const key = keyOf(name);
+        if (clients.has(key) && clients.get(key) !== ws) {
           return send(ws, 'hello-error', { reason: 'name-taken' });
         }
         ws.name = name;
+        ws.key = key;
         ws.avatar = String(msg.avatar || '').slice(0, 8);
         ws.bio = String(msg.bio || '').slice(0, 80);
-        clients.set(name, ws);
+        clients.set(key, ws);
         send(ws, 'hello-ok', { name, proto: PROTO });
-        notifyWatchers(name, true);
+        notifyWatchers(key, true);
         break;
       }
 
       case 'watch': {
-        ws.watching = new Set((msg.names || []).map((n) => String(n)));
-        const online = [...ws.watching].filter((n) => clients.has(n));
+        // Map(lowercased key -> the spelling this client used)
+        ws.watching = new Map((msg.names || []).map((n) => [keyOf(n), String(n)]));
+        const online = [];
         const profiles = {};
-        for (const n of online) profiles[n] = publicProfile(clients.get(n));
+        for (const [k, spelled] of ws.watching) {
+          const c = clients.get(k);
+          if (c) {
+            online.push(spelled);
+            profiles[spelled] = publicProfile(c);
+          }
+        }
         send(ws, 'presence', { online, profiles });
         break;
       }
 
+      case 'added': {
+        // someone put a friend in their list: tell the friend, so the app on
+        // the other side can auto-add back (friendship becomes mutual)
+        const target = clients.get(keyOf(msg.to));
+        if (target && target !== ws) {
+          send(target, 'added-you', { from: ws.name, ...publicProfile(ws) });
+        }
+        break;
+      }
+
       case 'challenge': {
-        const target = clients.get(msg.to);
-        if (target && target.name !== ws.name) send(target, 'challenged', { from: ws.name });
+        const target = clients.get(keyOf(msg.to));
+        if (target && target !== ws) send(target, 'challenged', { from: ws.name });
         else send(ws, 'challenge-failed', { to: msg.to, reason: 'offline' });
         break;
       }
 
       case 'challenge-cancel': {
-        const target = clients.get(msg.to);
+        const target = clients.get(keyOf(msg.to));
         if (target) send(target, 'challenge-cancelled', { from: ws.name });
         break;
       }
 
       case 'accept': {
         // msg.from is the challenger -> they become host, this client is guest
-        const host = clients.get(msg.from);
+        const host = clients.get(keyOf(msg.from));
         if (!host) return send(ws, 'opponent-left', {});
-        host.opponent = ws.name;
-        ws.opponent = msg.from;
+        host.opponent = ws.key;
+        ws.opponent = host.key;
         send(host, 'match-start', { role: 'host', opponent: ws.name });
-        send(ws, 'match-start', { role: 'guest', opponent: msg.from });
+        send(ws, 'match-start', { role: 'guest', opponent: host.name });
         break;
       }
 
       case 'decline': {
-        const host = clients.get(msg.from);
+        const host = clients.get(keyOf(msg.from));
         if (host) send(host, 'declined', { from: ws.name });
         break;
       }
@@ -167,8 +188,8 @@ wss.on('connection', (ws) => {
 
       case 'wave': {
         // a friendly hello relayed to an online friend
-        const target = clients.get(msg.to);
-        if (target && target.name !== ws.name) {
+        const target = clients.get(keyOf(msg.to));
+        if (target && target !== ws) {
           send(target, 'waved', { from: ws.name });
         }
         break;
@@ -176,8 +197,8 @@ wss.on('connection', (ws) => {
 
       case 'gift': {
         // forward a gift (coins / catnip lure) to a friend if they're online
-        const target = clients.get(msg.to);
-        if (target && target.name !== ws.name) {
+        const target = clients.get(keyOf(msg.to));
+        if (target && target !== ws) {
           send(target, 'gifted', { from: ws.name, item: msg.item, amount: msg.amount });
         } else {
           send(ws, 'gift-failed', { to: msg.to });
@@ -201,9 +222,9 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (ws.name) {
-      clients.delete(ws.name);
-      notifyWatchers(ws.name, false);
+    if (ws.key) {
+      clients.delete(ws.key);
+      notifyWatchers(ws.key, false);
     }
     const opp = clients.get(ws.opponent);
     if (opp) {
