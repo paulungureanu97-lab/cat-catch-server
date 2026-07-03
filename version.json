@@ -1,7 +1,7 @@
 {
-  "version": "1.4.3",
+  "version": "1.4.4",
   "notes": {
-    "it": "La mascotte che passeggia ora è nello stesso stile 3D del logo del gioco!",
-    "en": "The strolling mascot is now in the same 3D style as the game logo!"
+    "it": "Amicizie più facili: aggiungi un amico e diventate amici in automatico! Nomi senza maiuscole obbligate, art delle carte più affidabile e niente più promemoria a vuoto.",
+    "en": "Easier friendships: add a friend and you both get linked automatically! Case-insensitive names, more reliable card art and no more empty reminders."
   }
 }
