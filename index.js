@@ -165,6 +165,15 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'wave': {
+        // a friendly hello relayed to an online friend
+        const target = clients.get(msg.to);
+        if (target && target.name !== ws.name) {
+          send(target, 'waved', { from: ws.name });
+        }
+        break;
+      }
+
       case 'gift': {
         // forward a gift (coins / catnip lure) to a friend if they're online
         const target = clients.get(msg.to);
