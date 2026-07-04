@@ -151,7 +151,10 @@ wss.on('connection', (ws) => {
 
       case 'challenge': {
         const target = clients.get(keyOf(msg.to));
-        if (target && target !== ws) send(target, 'challenged', { from: ws.name });
+        if (target && target !== ws) {
+          target.pendingMode = msg.mode || 'pvp';
+          send(target, 'challenged', { from: ws.name, mode: target.pendingMode });
+        }
         else send(ws, 'challenge-failed', { to: msg.to, reason: 'offline' });
         break;
       }
@@ -168,8 +171,9 @@ wss.on('connection', (ws) => {
         if (!host) return send(ws, 'opponent-left', {});
         host.opponent = ws.key;
         ws.opponent = host.key;
-        send(host, 'match-start', { role: 'host', opponent: ws.name });
-        send(ws, 'match-start', { role: 'guest', opponent: host.name });
+        const mode = ws.pendingMode || 'pvp';
+        send(host, 'match-start', { role: 'host', opponent: ws.name, mode });
+        send(ws, 'match-start', { role: 'guest', opponent: host.name, mode });
         break;
       }
 
