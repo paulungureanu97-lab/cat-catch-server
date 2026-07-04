@@ -63,6 +63,20 @@ httpServer.listen(PORT, '0.0.0.0');
 const clients = new Map();
 const keyOf = (name) => String(name || '').trim().toLowerCase();
 
+/** Weekly leaderboard (in-memory — repopulated by clients pushing `score` on
+ * connect, so free-tier spin-downs only lose players until they reconnect).
+ * Weeks flip on Monday 00:00 UTC. */
+const weekKey = () => 'w' + Math.floor((Date.now() / 86400000 - 4) / 7);
+let lbWeek = weekKey();
+const lbScores = new Map(); // keyOf(name) -> { name, trophies, cats, at }
+function lbCheck() {
+  const wk = weekKey();
+  if (wk !== lbWeek) {
+    lbWeek = wk;
+    lbScores.clear();
+  }
+}
+
 function send(ws, type, payload = {}) {
   if (!ws || ws.readyState !== ws.OPEN) return;
   try {
@@ -219,6 +233,31 @@ wss.on('connection', (ws) => {
         } else {
           send(ws, 'trade-failed', { to: msg.to });
         }
+        break;
+      }
+
+      case 'score': {
+        // weekly leaderboard: clients push their TOTAL trophies/cats on connect
+        // (and before requesting the board), so the in-memory board repopulates
+        // by itself after a free-tier spin-down.
+        lbCheck();
+        if (ws.name) {
+          lbScores.set(keyOf(ws.name), {
+            name: ws.name,
+            trophies: Math.max(0, msg.trophies | 0),
+            cats: Math.max(0, msg.cats | 0),
+            at: Date.now(),
+          });
+        }
+        break;
+      }
+
+      case 'leaderboard': {
+        lbCheck();
+        const entries = [...lbScores.values()]
+          .sort((a, b) => b.trophies - a.trophies || b.cats - a.cats)
+          .slice(0, 50);
+        send(ws, 'leaderboard', { week: lbWeek, entries });
         break;
       }
 
