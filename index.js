@@ -152,10 +152,10 @@ wss.on('connection', (ws) => {
       case 'challenge': {
         const target = clients.get(keyOf(msg.to));
         if (target && target !== ws) {
+          // remember the mode (pvp | coop) so match-start can carry it to both
           target.pendingMode = msg.mode || 'pvp';
           send(target, 'challenged', { from: ws.name, mode: target.pendingMode });
-        }
-        else send(ws, 'challenge-failed', { to: msg.to, reason: 'offline' });
+        } else send(ws, 'challenge-failed', { to: msg.to, reason: 'offline' });
         break;
       }
 
@@ -206,6 +206,18 @@ wss.on('connection', (ws) => {
           send(target, 'gifted', { from: ws.name, item: msg.item, amount: msg.amount });
         } else {
           send(ws, 'gift-failed', { to: msg.to });
+        }
+        break;
+      }
+
+      case 'trade': {
+        // cat-trading handshake: relay the payload (offer / answer / confirm /
+        // cancel — the clients own the semantics) to the named friend
+        const target = clients.get(keyOf(msg.to));
+        if (target && target !== ws) {
+          send(target, 'trade', { from: ws.name, data: msg.data });
+        } else {
+          send(ws, 'trade-failed', { to: msg.to });
         }
         break;
       }
