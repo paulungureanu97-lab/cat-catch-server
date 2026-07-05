@@ -1,7 +1,7 @@
 {
-  "version": "1.23.0",
+  "version": "1.24.0",
   "notes": {
-    "it": "Sfondo della Torre del Boss migliorato! Ora c'e una torre oscura in stile Clash of Clans con cristalli viola, crepe magiche che pulsano e lava alla base — un video verticale animato che riempie tutto lo schermo.",
-    "en": "Improved Boss Tower background! A dark Clash-of-Clans-style tower with purple crystals, pulsing magic cracks and lava at the base — a full-screen vertical animated video."
+    "it": "Colonna sonora di BATTAGLIA! Durante gli scontri (Torre del Boss, battaglie e PvP/co-op) parte una musica dedicata, ricavata dal video della torre. Si ferma con l'interruttore audio come il resto dei suoni.",
+    "en": "BATTLE soundtrack! During fights (Boss Tower, battles and PvP/co-op) a dedicated track now plays, taken from the tower video. It respects the sound toggle like the rest of the audio."
   }
 }
