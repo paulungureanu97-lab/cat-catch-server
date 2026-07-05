@@ -14,6 +14,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { WebSocketServer } = require('ws');
+const colonies = require('./colonies');
 
 const PORT = Number(process.env.PORT) || 8765;
 // Protocol version: bump when the wire format changes incompatibly.
@@ -104,6 +105,15 @@ function blockedList(uid) {
 function socketByUid(uid) {
   for (const c of clients.values()) if (c.uid && c.uid === uid) return c;
   return null;
+}
+
+/** push a colony update to every online member (so the tree refreshes live) */
+function pushColony(colony) {
+  if (!colony) return;
+  for (const m of colony.members) {
+    const s = socketByUid(m.uid);
+    if (s) send(s, 'colony-mine', { colony });
+  }
 }
 
 /** Weekly leaderboard (in-memory — repopulated by clients pushing `score` on
@@ -219,6 +229,13 @@ wss.on('connection', (ws) => {
         // deliver any moderation blocks the admin issued for this player while
         // they were away (their device persists them from here on)
         if (uid && blocks.has(uid)) send(ws, 'blocked', { cats: blockedList(uid) });
+        // tell the client which colony it belongs to (if any)
+        if (uid) {
+          colonies
+            .myColony(uid)
+            .then((c) => send(ws, 'colony-mine', { colony: c || null }))
+            .catch(() => {});
+        }
         send(ws, 'server-load', loadPayload()); // tell the newcomer the current load
         broadcastLoadIfChanged(); // if this connection tipped us over, warn everyone
         notifyWatchers(key, true);
@@ -409,6 +426,112 @@ wss.on('connection', (ws) => {
         const target = socketByUid(uid);
         if (target) send(target, 'blocked', { cats: list });
         send(ws, 'admin-ok', { uid, cats: list });
+        break;
+      }
+
+      // ---- Colonies (clans) — Phase 1 ----
+      case 'colony-list': {
+        colonies
+          .list()
+          .then((items) => send(ws, 'colony-list', { items }))
+          .catch(() => send(ws, 'colony-list', { items: [] }));
+        break;
+      }
+
+      case 'colony-create': {
+        (async () => {
+          if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
+          const r = await colonies.create(ws.uid, ws.name, ws.avatar, {
+            name: msg.name,
+            emoji: msg.emoji,
+            bio: msg.bio,
+            max: msg.max,
+          });
+          if (r.error) return send(ws, 'colony-error', { reason: r.error });
+          await colonies.save(r.colony);
+          await colonies.register(r.id);
+          await colonies.setMember(ws.uid, r.id);
+          send(ws, 'colony-mine', { colony: r.colony });
+        })().catch(() => send(ws, 'colony-error', { reason: 'error' }));
+        break;
+      }
+
+      case 'colony-join': {
+        (async () => {
+          if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
+          const r = await colonies.join(ws.uid, String(msg.id || ''), ws.name, ws.avatar);
+          if (r.error) return send(ws, 'colony-error', { reason: r.error });
+          await colonies.save(r.colony);
+          await colonies.setMember(ws.uid, r.colony.id);
+          pushColony(r.colony);
+        })().catch(() => send(ws, 'colony-error', { reason: 'error' }));
+        break;
+      }
+
+      case 'colony-leave': {
+        (async () => {
+          const c = await colonies.myColony(ws.uid);
+          await colonies.clearMember(ws.uid);
+          send(ws, 'colony-mine', { colony: null });
+          if (!c) return;
+          const { colony } = colonies.removeMember(c, ws.uid);
+          if (!colony) return colonies.disband(c.id);
+          await colonies.save(colony);
+          pushColony(colony);
+        })().catch(() => {});
+        break;
+      }
+
+      case 'colony-kick': {
+        (async () => {
+          const c = await colonies.myColony(ws.uid);
+          if (!c || !colonies.canManage(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
+          const target = String(msg.uid || '');
+          if (target === ws.uid || colonies.roleOf(c, target) === 'leader') {
+            return send(ws, 'colony-error', { reason: 'bad-target' });
+          }
+          const { colony } = colonies.removeMember(c, target);
+          await colonies.clearMember(target);
+          const ts = socketByUid(target);
+          if (ts) {
+            send(ts, 'colony-kicked', { name: c.name });
+            send(ts, 'colony-mine', { colony: null });
+          }
+          if (colony) {
+            await colonies.save(colony);
+            pushColony(colony);
+          } else {
+            await colonies.disband(c.id);
+          }
+        })().catch(() => {});
+        break;
+      }
+
+      case 'colony-role': {
+        (async () => {
+          const c = await colonies.myColony(ws.uid);
+          if (!c || !colonies.isLeader(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
+          const target = String(msg.uid || '');
+          const role = msg.role === 'elder' ? 'elder' : 'member';
+          const m = c.members.find((x) => x.uid === target);
+          if (!m || target === ws.uid || m.role === 'leader') return send(ws, 'colony-error', { reason: 'bad-target' });
+          m.role = role;
+          await colonies.save(c);
+          pushColony(c);
+        })().catch(() => {});
+        break;
+      }
+
+      case 'colony-edit': {
+        (async () => {
+          const c = await colonies.myColony(ws.uid);
+          if (!c || !colonies.isLeader(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
+          if (msg.emoji != null) c.emoji = colonies.clean(msg.emoji, 4) || c.emoji;
+          if (msg.bio != null) c.bio = colonies.clean(msg.bio, 120);
+          if (msg.max != null) c.max = Math.max(c.members.length, colonies.clampMax(msg.max));
+          await colonies.save(c);
+          pushColony(c);
+        })().catch(() => {});
         break;
       }
 
