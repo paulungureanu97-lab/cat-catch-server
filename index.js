@@ -316,11 +316,15 @@ wss.on('connection', (ws) => {
         // deliver any moderation blocks the admin issued for this player while
         // they were away (their device persists them from here on)
         if (uid && blocks.has(uid)) send(ws, 'blocked', { cats: blockedList(uid) });
-        // tell the client which colony it belongs to (if any)
+        // tell the client which colony it belongs to (if any); roll its weekly
+        // missions over if a new week started while it was dormant
         if (uid) {
           colonies
             .myColony(uid)
-            .then((c) => send(ws, 'colony-mine', { colony: c || null }))
+            .then(async (c) => {
+              if (c && colonies.ensureMissions(c)) await colonies.save(c);
+              send(ws, 'colony-mine', { colony: c || null });
+            })
             .catch(() => {});
         }
         send(ws, 'server-load', loadPayload()); // tell the newcomer the current load
@@ -607,6 +611,37 @@ wss.on('connection', (ws) => {
           if (!m || target === ws.uid || m.role === 'leader') return send(ws, 'colony-error', { reason: 'bad-target' });
           m.role = role;
           await colonies.save(c);
+          pushColony(c);
+        })().catch(() => {});
+        break;
+      }
+
+      case 'colony-progress': {
+        // a member's catch/win/etc. feeds the colony's collective missions
+        (async () => {
+          if (!ws.uid) return;
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return;
+          const rolled = colonies.ensureMissions(c);
+          const moved = colonies.addProgress(c, String(msg.pt || '').slice(0, 16), msg.amount | 0 || 1);
+          if (rolled || moved) {
+            await colonies.save(c);
+            pushColony(c);
+          }
+        })().catch(() => {});
+        break;
+      }
+
+      case 'colony-claim': {
+        // a member claims a completed mission's reward (once per member)
+        (async () => {
+          if (!ws.uid) return;
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+          const r = colonies.claimMission(c, ws.uid, String(msg.mid || ''));
+          if (r.error) return send(ws, 'colony-error', { reason: r.error });
+          await colonies.save(c);
+          send(ws, 'colony-reward', { coins: r.reward.coins, xp: r.reward.xp });
           pushColony(c);
         })().catch(() => {});
         break;
