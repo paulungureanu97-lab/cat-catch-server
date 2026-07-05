@@ -1,7 +1,7 @@
 {
-  "version": "1.20.0",
+  "version": "1.21.0",
   "notes": {
-    "it": "COLONIE — Fase 3: TORNEI TRA COLONIE! Dalla schermata della colonia apri Torneo: un capo/anziano iscrive la colonia al tabellone settimanale a eliminazione diretta. Quando ci sono almeno 2 colonie si avvia il torneo: gli scontri si risolvono in base alla forza reale di ogni colonia (mazzi e trofei dei membri) con qualche sorpresa. Il tabellone mostra tutti i turni fino alla finale, e la colonia campione e la finalista ricevono ricompense (monete + XP) che ogni membro puo riscuotere. Il torneo si rinnova ogni settimana.",
-    "en": "COLONIES — Phase 3: INTER-COLONY TOURNAMENTS! From the colony screen open Tournament: a leader/elder enters the colony into the weekly single-elimination bracket. With at least 2 colonies the tournament starts: matches resolve from each colony's real strength (members' decks and trophies) with a few upsets. The bracket shows every round up to the final, and the champion and finalist colonies get rewards (coins + XP) each member can claim. It refreshes every week."
+    "it": "TORNEI GIOCATI — le FAIDE tra colonie! Ora gli scontri del torneo si giocano davvero: quando parte una faida ricevi una notifica, entri e vedi la colonia avversaria. Ogni membro puo attaccare (2 attacchi) i mazzi dei membri avversari: ogni vittoria vale 1 punto per la tua colonia. Sul tabellone vedi i punteggi di ogni scontro e il totale della faida in corso. Una faida dura al massimo 1 giorno: allo scadere (o quando entrambe le colonie hanno esaurito gli attacchi) chi ha piu punti avanza. Campione e finalista ricevono ricompense.",
+    "en": "PLAYED TOURNAMENTS — colony FEUDS! Tournament matches are now really played: when a feud starts you get a notification, enter, and see the rival colony. Each member can attack (2 attacks) the enemy members' decks: every win = 1 point for your colony. The bracket shows each matchup's score and the running feud total. A feud lasts up to 1 day: on expiry (or once both colonies use all attacks) the higher score advances. Champion and finalist get rewards."
   }
 }
