@@ -124,11 +124,27 @@ wss.on('connection', (ws) => {
         const name = String(msg.name || '').trim().slice(0, 20);
         if (!name) return send(ws, 'hello-error', { reason: 'empty-name' });
         const key = keyOf(name);
-        if (clients.has(key) && clients.get(key) !== ws) {
-          return send(ws, 'hello-error', { reason: 'name-taken' });
+        const uid = String(msg.uid || '').slice(0, 40);
+        const existing = clients.get(key);
+        if (existing && existing !== ws) {
+          // Same per-install uid (or a stale pre-uid registration, e.g. the
+          // ghost socket left behind by the app the player just updated away
+          // from) -> it's the SAME player reconnecting: kick the old socket.
+          // A DIFFERENT uid is genuinely another player -> name stays taken.
+          if ((uid && existing.uid === uid) || !existing.uid) {
+            clients.delete(key);
+            try {
+              existing.close();
+            } catch {
+              /* ignore */
+            }
+          } else {
+            return send(ws, 'hello-error', { reason: 'name-taken' });
+          }
         }
         ws.name = name;
         ws.key = key;
+        ws.uid = uid;
         ws.avatar = String(msg.avatar || '').slice(0, 8);
         ws.bio = String(msg.bio || '').slice(0, 80);
         clients.set(key, ws);
@@ -295,7 +311,9 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    if (ws.key) {
+    // only unregister if the map still points at THIS socket — a kicked ghost
+    // (uid takeover on reconnect) must not wipe the replacing player's entry
+    if (ws.key && clients.get(ws.key) === ws) {
       clients.delete(ws.key);
       notifyWatchers(ws.key, false);
     }
