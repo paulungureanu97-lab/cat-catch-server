@@ -1,7 +1,7 @@
 {
-  "version": "1.25.1",
+  "version": "1.25.2",
   "notes": {
-    "it": "Fix: lo sfondo animato tornando su una schermata.",
-    "en": "Fix: animated background when returning to a screen."
+    "it": "Fix sfondi: non spariscono piu cambiando schermata.",
+    "en": "Background fix: no longer disappears when switching screens."
   }
 }
