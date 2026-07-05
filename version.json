@@ -1,7 +1,7 @@
 {
-  "version": "1.18.0",
+  "version": "1.19.0",
   "notes": {
-    "it": "COLONIE (Fase 1)! Dalla schermata Online apri le Colonie: crea la tua colonia con nome, emblema, descrizione e numero massimo di membri, oppure entra in una esistente. I membri appaiono sui rami di un grande albero. Ruoli interni (Capo, Anziano, Membro) con gestione: promuovi, retrocedi, espelli. Prossime fasi: missioni, ricompense e tornei tra colonie.",
-    "en": "COLONIES (Phase 1)! From the Online screen open Colonies: create your own with a name, emblem, description and member cap, or join an existing one. Members perch on a big tree. Internal roles (Leader, Elder, Member) with management: promote, demote, kick. Coming next: missions, rewards and inter-colony tournaments."
+    "it": "COLONIE — Fase 2: MISSIONI e RICOMPENSE! Ogni colonia ha 3 missioni settimanali collettive: tutti i membri contribuiscono alla stessa barra (catture, vittorie, battaglie, gatti rari, catture perfette). Quando una missione e completa ogni membro riscuote la ricompensa (monete + XP) dal pulsante Missioni nella schermata della colonia. Le missioni si rinnovano ogni settimana. Inoltre: classifica, blocchi e segnalazioni ora restano salvati sul server anche dopo un riavvio.",
+    "en": "COLONIES — Phase 2: MISSIONS and REWARDS! Each colony has 3 collective weekly missions: every member feeds the same bar (catches, wins, battles, rare cats, perfect captures). When a mission is complete each member claims the reward (coins + XP) from the Missions button on the colony screen. Missions refresh every week. Also: the leaderboard, blocks and reports now persist on the server across a restart."
   }
 }
