@@ -86,12 +86,32 @@ function broadcastLoadIfChanged() {
   for (const c of clients.values()) send(c, 'server-load', p);
 }
 
+// ---- Moderation (report a PvP opponent -> the admin reviews -> blocks a card) ----
+// The admin unlocks moderation by entering ADMIN_KEY (a secret only they know,
+// set as a Render env var — NEVER hard-code it in this public repo) in the app.
+// Reports + blocks are in-memory; a delivered block is persisted on the target's
+// device so it survives a server restart. If ADMIN_KEY is unset, moderation is
+// disabled (report still works, but no one can read reports or issue blocks).
+const ADMIN_KEY = String(process.env.ADMIN_KEY || '');
+const reports = []; // { reporter, reported, at } — newest last, capped
+const blocks = new Map(); // uid -> Set(catId) blocked for that player
+const isAdmin = (key) => ADMIN_KEY.length > 0 && String(key || '') === ADMIN_KEY;
+function blockedList(uid) {
+  const set = blocks.get(String(uid || ''));
+  return set ? [...set] : [];
+}
+/** find the connected socket for a player uid (blocks are keyed by uid) */
+function socketByUid(uid) {
+  for (const c of clients.values()) if (c.uid && c.uid === uid) return c;
+  return null;
+}
+
 /** Weekly leaderboard (in-memory — repopulated by clients pushing `score` on
  * connect, so free-tier spin-downs only lose players until they reconnect).
  * Weeks flip on Monday 00:00 UTC. */
 const weekKey = () => 'w' + Math.floor((Date.now() / 86400000 - 4) / 7);
 let lbWeek = weekKey();
-const lbScores = new Map(); // keyOf(name) -> { name, trophies, cats, at }
+const lbScores = new Map(); // keyOf(name) -> { name, uid, trophies, cats, deck, at }
 function lbCheck() {
   const wk = weekKey();
   if (wk !== lbWeek) {
@@ -109,6 +129,7 @@ function sanitizeDeck(deck) {
   if (!Array.isArray(deck)) return [];
   return deck.slice(0, 12).map((c) => {
     const card = {
+      id: String((c && c.id) || '').slice(0, 48),
       name: String((c && c.name) || '').slice(0, 24),
       rarity: String((c && c.rarity) || 'common').slice(0, 12),
       cost: (c && c.cost) | 0,
@@ -195,6 +216,9 @@ wss.on('connection', (ws) => {
         ws.bio = String(msg.bio || '').slice(0, 80);
         clients.set(key, ws);
         send(ws, 'hello-ok', { name, proto: PROTO });
+        // deliver any moderation blocks the admin issued for this player while
+        // they were away (their device persists them from here on)
+        if (uid && blocks.has(uid)) send(ws, 'blocked', { cats: blockedList(uid) });
         send(ws, 'server-load', loadPayload()); // tell the newcomer the current load
         broadcastLoadIfChanged(); // if this connection tipped us over, warn everyone
         notifyWatchers(key, true);
@@ -312,6 +336,7 @@ wss.on('connection', (ws) => {
         if (ws.name) {
           lbScores.set(keyOf(ws.name), {
             name: ws.name,
+            uid: ws.uid || '',
             trophies: Math.max(0, msg.trophies | 0),
             cats: Math.max(0, msg.cats | 0),
             avatar: String(msg.avatar || '').slice(0, 8),
@@ -342,6 +367,48 @@ wss.on('connection', (ws) => {
         const e = lbScores.get(keyOf(msg.name));
         if (e) send(ws, 'player-info', { found: true, ...e });
         else send(ws, 'player-info', { found: false, name: msg.name });
+        break;
+      }
+
+      case 'report': {
+        // any player can report an opponent after a PvP match (reason is always
+        // "non-cat card" for now). Stored for the admin + logged to the console
+        // so it's visible in the Render logs too.
+        const reported = String(msg.reported || '').slice(0, 20);
+        if (ws.name && reported && keyOf(reported) !== ws.key) {
+          reports.push({ reporter: ws.name, reported, at: Date.now() });
+          if (reports.length > 200) reports.shift();
+          console.log(`[REPORT] ${ws.name} reported ${reported}`);
+        }
+        break;
+      }
+
+      case 'admin-reports': {
+        // admin reads the report queue (newest first)
+        if (!isAdmin(msg.key)) return send(ws, 'admin-error', { reason: 'auth' });
+        send(ws, 'admin-reports', { reports: [...reports].reverse().slice(0, 100) });
+        break;
+      }
+
+      case 'admin-block':
+      case 'admin-unblock': {
+        // admin blocks/unblocks ONE card (by cat id) for a player (by uid). The
+        // target's client persists it; we also push the fresh list if they're on.
+        if (!isAdmin(msg.key)) return send(ws, 'admin-error', { reason: 'auth' });
+        const uid = String(msg.uid || '');
+        const cat = String(msg.cat || '').slice(0, 48);
+        if (!uid || !cat) return send(ws, 'admin-error', { reason: 'bad-args' });
+        let set = blocks.get(uid);
+        if (!set) {
+          set = new Set();
+          blocks.set(uid, set);
+        }
+        if (msg.type === 'admin-block') set.add(cat);
+        else set.delete(cat);
+        const list = blockedList(uid);
+        const target = socketByUid(uid);
+        if (target) send(target, 'blocked', { cats: list });
+        send(ws, 'admin-ok', { uid, cats: list });
         break;
       }
 
