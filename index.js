@@ -67,6 +67,25 @@ httpServer.listen(PORT, '0.0.0.0');
 const clients = new Map();
 const keyOf = (name) => String(name || '').trim().toLowerCase();
 
+/** Soft capacity: past this many CONCURRENT players the server tells clients it
+ * is "busy" so the app can show a heads-up banner (nobody is refused — this is
+ * a friends game, just a courtesy warning on a small free-tier instance).
+ * Tunable via the MAX_PLAYERS env var. */
+const SOFT_LIMIT = Number(process.env.MAX_PLAYERS) || 40;
+let lastBusy = false;
+function loadPayload() {
+  return { online: clients.size, limit: SOFT_LIMIT, busy: clients.size >= SOFT_LIMIT };
+}
+/** Push the current load to everyone whenever the busy state flips, so already
+ * connected players see the banner appear/disappear live. */
+function broadcastLoadIfChanged() {
+  const busy = clients.size >= SOFT_LIMIT;
+  if (busy === lastBusy) return;
+  lastBusy = busy;
+  const p = loadPayload();
+  for (const c of clients.values()) send(c, 'server-load', p);
+}
+
 /** Weekly leaderboard (in-memory — repopulated by clients pushing `score` on
  * connect, so free-tier spin-downs only lose players until they reconnect).
  * Weeks flip on Monday 00:00 UTC. */
@@ -176,6 +195,8 @@ wss.on('connection', (ws) => {
         ws.bio = String(msg.bio || '').slice(0, 80);
         clients.set(key, ws);
         send(ws, 'hello-ok', { name, proto: PROTO });
+        send(ws, 'server-load', loadPayload()); // tell the newcomer the current load
+        broadcastLoadIfChanged(); // if this connection tipped us over, warn everyone
         notifyWatchers(key, true);
         break;
       }
@@ -345,6 +366,7 @@ wss.on('connection', (ws) => {
     if (ws.key && clients.get(ws.key) === ws) {
       clients.delete(ws.key);
       notifyWatchers(ws.key, false);
+      broadcastLoadIfChanged(); // dropping below the limit clears everyone's banner
     }
     const opp = clients.get(ws.opponent);
     if (opp) {
