@@ -1,7 +1,7 @@
 {
-  "version": "1.25.2",
+  "version": "1.25.3",
   "notes": {
-    "it": "Fix sfondi: non spariscono piu cambiando schermata.",
-    "en": "Background fix: no longer disappears when switching screens."
+    "it": "Fix sfondi: restano sempre visibili cambiando schermata.",
+    "en": "Background fix: stays visible when switching screens."
   }
 }
