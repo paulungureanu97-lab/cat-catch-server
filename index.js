@@ -56,7 +56,11 @@ const httpServer = http.createServer((req, res) => {
   res.end('not found');
 });
 
-const wss = new WebSocketServer({ server: httpServer });
+// maxPayload caps a single ws frame at 1 MB — the client never sends more (a
+// full score with 12 photo thumbnails is well under that), but it stops a
+// malicious ws client from flooding 100 MB frames (the library default) and
+// OOM-ing the free-tier instance.
+const wss = new WebSocketServer({ server: httpServer, maxPayload: 1024 * 1024 });
 httpServer.listen(PORT, '0.0.0.0');
 
 /** lowercased name -> ws (matching is case-insensitive, display keeps casing) */
@@ -75,6 +79,29 @@ function lbCheck() {
     lbWeek = wk;
     lbScores.clear();
   }
+}
+
+// A player's public deck is stored in memory and served to anyone who opens
+// their card, so bound it hard: at most 12 cards, drop any photo over ~90KB
+// base64, and keep only the fields the client actually reads. Prevents a
+// modified client from parking hundreds of MB of base64 in the leaderboard.
+const MAX_CARD_PHOTO = 92_000;
+function sanitizeDeck(deck) {
+  if (!Array.isArray(deck)) return [];
+  return deck.slice(0, 12).map((c) => {
+    const card = {
+      name: String((c && c.name) || '').slice(0, 24),
+      rarity: String((c && c.rarity) || 'common').slice(0, 12),
+      cost: (c && c.cost) | 0,
+      power: (c && c.power) | 0,
+      tribe: String((c && c.tribe) || '').slice(0, 24),
+      ability: String((c && c.ability) || '').slice(0, 48),
+      cutout: !!(c && c.cutout),
+      gear: Array.isArray(c && c.gear) ? c.gear.slice(0, 3).map((g) => String(g).slice(0, 32)) : [],
+    };
+    if (c && typeof c.photo === 'string' && c.photo.length <= MAX_CARD_PHOTO) card.photo = c.photo;
+    return card;
+  });
 }
 
 function send(ws, type, payload = {}) {
@@ -154,8 +181,10 @@ wss.on('connection', (ws) => {
       }
 
       case 'watch': {
-        // Map(lowercased key -> the spelling this client used)
-        ws.watching = new Map((msg.names || []).map((n) => [keyOf(n), String(n)]));
+        // Map(lowercased key -> the spelling this client used); cap the friend
+        // list so a client can't grow an unbounded Map on the server
+        const names = Array.isArray(msg.names) ? msg.names.slice(0, 200) : [];
+        ws.watching = new Map(names.map((n) => [keyOf(n), String(n).slice(0, 20)]));
         const online = [];
         const profiles = {};
         for (const [k, spelled] of ws.watching) {
@@ -267,7 +296,7 @@ wss.on('connection', (ws) => {
             avatar: String(msg.avatar || '').slice(0, 8),
             bio: String(msg.bio || '').slice(0, 80),
             level: Math.max(0, msg.level | 0),
-            deck: Array.isArray(msg.deck) ? msg.deck.slice(0, 12) : [],
+            deck: sanitizeDeck(msg.deck),
             at: Date.now(),
           });
         }
