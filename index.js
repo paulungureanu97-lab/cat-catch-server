@@ -138,6 +138,17 @@ function colonyStrength(colony) {
   return { strength: total, champion };
 }
 
+/** A colony's tournament roster: each member with their champion deck (from the
+ * live leaderboard) so opponents can be BATTLED on-device. Decks carry no photos
+ * (opponents render rarity art), so this stays small. */
+function colonyRoster(colony) {
+  return colony.members.map((m) => {
+    const e = lbScores.get(keyOf(m.name || ''));
+    const deck = e && Array.isArray(e.deck) ? e.deck.map((c) => ({ ...c, photo: undefined })) : [];
+    return { uid: m.uid, name: m.name || '', deck };
+  });
+}
+
 /** push the current tournament to every online member of an entrant colony */
 async function pushTournament(t) {
   if (!t || !Array.isArray(t.entrants)) return;
@@ -147,6 +158,34 @@ async function pushTournament(t) {
     for (const m of c.members) {
       const s = socketByUid(m.uid);
       if (s) send(s, 'tour-info', { tournament: t, last: null });
+    }
+  }
+}
+
+// All tournament state lives in ONE durable key, so concurrent attacks/joins do
+// read-modify-write over async store ops and would clobber each other (lost
+// updates — worse over Upstash's network). Serialize every tournament mutation
+// through a promise chain so they apply one-at-a-time.
+let tourChain = Promise.resolve();
+function withTourLock(fn) {
+  const run = tourChain.then(fn, fn);
+  tourChain = run.catch(() => {});
+  return run;
+}
+
+/** notify online members of both colonies in the given feuds that a war started */
+async function pushFeudStart(t, feudIds) {
+  if (!t || !Array.isArray(feudIds)) return;
+  for (const fid of feudIds) {
+    const f = t.feuds[fid];
+    if (!f || !f.aId || !f.bId) continue;
+    for (const [cid, oppName] of [[f.aId, f.bName], [f.bId, f.aName]]) {
+      const c = await colonies.get(cid);
+      if (!c) continue;
+      for (const m of c.members) {
+        const s = socketByUid(m.uid);
+        if (s) send(s, 'feud-start', { colony: c.name, opponent: oppName, feudId: fid });
+      }
     }
   }
 }
@@ -694,50 +733,71 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ---- Colony tournaments — Phase 3 ----
+      // ---- Colony tournaments — Phase 3 (played feuds/wars) ----
       case 'tour-info': {
-        (async () => {
+        withTourLock(async () => {
           const t = await tournament.current();
+          // lazily resolve expired feuds / activate ready rounds on every read
+          const { activated } = tournament.tick(t, Date.now());
+          if (activated.length) {
+            await tournament.save(t);
+            await pushFeudStart(t, activated);
+            await pushTournament(t);
+          }
           const lt = await tournament.last();
           send(ws, 'tour-info', { tournament: t, last: lt || null });
-        })().catch(() => {});
+        }).catch(() => {});
         break;
       }
 
       case 'tour-join': {
-        (async () => {
+        withTourLock(async () => {
           if (!ws.uid) return send(ws, 'tour-error', { reason: 'no-uid' });
           const c = await colonies.myColony(ws.uid);
           if (!c) return send(ws, 'tour-error', { reason: 'not-in' });
           if (!colonies.canManage(c, ws.uid)) return send(ws, 'tour-error', { reason: 'auth' });
           const t = await tournament.current();
-          const { strength, champion } = colonyStrength(c);
-          const r = tournament.join(t, { colonyId: c.id, name: c.name, emoji: c.emoji, strength, champion });
+          const { strength } = colonyStrength(c);
+          const r = tournament.join(t, { colonyId: c.id, name: c.name, emoji: c.emoji, strength, roster: colonyRoster(c) });
           if (r.error) return send(ws, 'tour-error', { reason: r.error });
           await tournament.save(t);
           await pushTournament(t);
           send(ws, 'tour-info', { tournament: t, last: null });
-        })().catch(() => send(ws, 'tour-error', { reason: 'error' }));
+        }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
       }
 
       case 'tour-start': {
-        (async () => {
+        withTourLock(async () => {
           if (!ws.uid) return send(ws, 'tour-error', { reason: 'no-uid' });
           const c = await colonies.myColony(ws.uid);
           if (!c || !colonies.canManage(c, ws.uid)) return send(ws, 'tour-error', { reason: 'auth' });
           const t = await tournament.current();
           if (!t.entrants.some((e) => e.colonyId === c.id)) return send(ws, 'tour-error', { reason: 'not-entrant' });
-          const r = tournament.start(t);
+          const r = tournament.start(t, Date.now());
+          if (r.error) return send(ws, 'tour-error', { reason: r.error });
+          await tournament.save(t);
+          await pushFeudStart(t, r.activated || []);
+          await pushTournament(t);
+        }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
+        break;
+      }
+
+      case 'tour-attack': {
+        // a member reports a played feud battle (win/loss + lanes won)
+        withTourLock(async () => {
+          if (!ws.uid) return send(ws, 'tour-error', { reason: 'no-uid' });
+          const t = await tournament.current();
+          const r = tournament.attack(t, String(msg.feudId || ''), ws.uid, msg.oppName, !!msg.win, msg.lanes | 0, Date.now());
           if (r.error) return send(ws, 'tour-error', { reason: r.error });
           await tournament.save(t);
           await pushTournament(t);
-        })().catch(() => send(ws, 'tour-error', { reason: 'error' }));
+        }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
       }
 
       case 'tour-claim': {
-        (async () => {
+        withTourLock(async () => {
           if (!ws.uid) return send(ws, 'tour-error', { reason: 'no-uid' });
           const c = await colonies.myColony(ws.uid);
           if (!c) return send(ws, 'tour-error', { reason: 'not-in' });
@@ -747,7 +807,7 @@ wss.on('connection', (ws) => {
           await tournament.save(t);
           send(ws, 'tour-reward', { coins: r.reward.coins, xp: r.reward.xp, place: r.reward.place });
           send(ws, 'tour-info', { tournament: t, last: null });
-        })().catch(() => send(ws, 'tour-error', { reason: 'error' }));
+        }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
       }
 
