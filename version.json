@@ -1,7 +1,7 @@
 {
-  "version": "1.25.4",
+  "version": "1.25.5",
   "notes": {
-    "it": "Sfondi: correzione + interruttore in Impostazioni per spegnerli.",
-    "en": "Backgrounds: fix + a Settings toggle to turn them off."
+    "it": "Sfondi statici di default. Puoi provare quelli animati da Impostazioni.",
+    "en": "Static backgrounds by default. Try animated ones from Settings."
   }
 }
