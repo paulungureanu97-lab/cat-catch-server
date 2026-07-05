@@ -1,7 +1,7 @@
 {
-  "version": "1.24.0",
+  "version": "1.25.0",
   "notes": {
-    "it": "Colonna sonora di BATTAGLIA! Durante gli scontri (Torre del Boss, battaglie e PvP/co-op) parte una musica dedicata, ricavata dal video della torre. Si ferma con l'interruttore audio come il resto dei suoni.",
-    "en": "BATTLE soundtrack! During fights (Boss Tower, battles and PvP/co-op) a dedicated track now plays, taken from the tower video. It respects the sound toggle like the rest of the audio."
+    "it": "Sfondi animati in tutte le schermate del gioco.",
+    "en": "Animated backgrounds across all the game screens."
   }
 }
