@@ -18,6 +18,66 @@ function newId() {
   return 'c_' + Date.now().toString(36) + seq.toString(36) + Math.floor(Math.random() * 1e6).toString(36);
 }
 
+// ---- Phase 2: weekly colony missions + rewards ----
+// Collective goals the whole colony chips away at together (every member's
+// catches/wins count into the SAME progress bar). When a mission is complete
+// each member can claim its reward ONCE (coins + xp applied on their device).
+// Missions rotate weekly (Mon 00:00 UTC), deterministically per colony+week so
+// every member — and the server across a restart — sees the identical set.
+const MISSION_POOL = [
+  { type: 'catch', goal: 40, coins: 60, xp: 40 },
+  { type: 'win', goal: 25, coins: 90, xp: 55 },
+  { type: 'battle', goal: 40, coins: 55, xp: 40 },
+  { type: 'rare', goal: 12, coins: 100, xp: 60 },
+  { type: 'perfect', goal: 20, coins: 75, xp: 45 },
+];
+const MISSION_COUNT = 3;
+const weekId = () => 'w' + Math.floor((Date.now() / 86400000 - 4) / 7);
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+/** Ensure the colony has this week's missions; returns true if it regenerated. */
+function ensureMissions(c) {
+  if (!c) return false;
+  const wk = weekId();
+  if (c.missionWeek === wk && Array.isArray(c.missions) && c.missions.length) return false;
+  const start = hashStr(c.id + wk) % MISSION_POOL.length;
+  c.missionWeek = wk;
+  c.missions = Array.from({ length: MISSION_COUNT }, (_, i) => {
+    const m = MISSION_POOL[(start + i) % MISSION_POOL.length];
+    return { id: `${wk}_${i}`, type: m.type, goal: m.goal, coins: m.coins, xp: m.xp, progress: 0, claimedBy: [] };
+  });
+  if (typeof c.missionsDone !== 'number') c.missionsDone = 0; // all-time completed (colony progression)
+  return true;
+}
+/** Add collective progress to every active mission of `type`. Returns true if any moved. */
+function addProgress(c, type, amount) {
+  ensureMissions(c);
+  let changed = false;
+  const amt = Math.max(1, Math.min(100, amount | 0));
+  for (const m of c.missions) {
+    if (m.type === type && m.progress < m.goal) {
+      m.progress = Math.min(m.goal, m.progress + amt);
+      changed = true;
+    }
+  }
+  return changed;
+}
+/** One member claims a completed mission's reward (once). */
+function claimMission(c, uid, mid) {
+  ensureMissions(c);
+  const m = c.missions.find((x) => x.id === mid);
+  if (!m) return { error: 'no-mission' };
+  if (m.progress < m.goal) return { error: 'incomplete' };
+  if (!c.members.some((x) => x.uid === uid)) return { error: 'not-member' };
+  if (m.claimedBy.includes(uid)) return { error: 'claimed' };
+  m.claimedBy.push(uid);
+  if (m.claimedBy.length === 1) c.missionsDone = (c.missionsDone || 0) + 1; // first claim = colony completed it
+  return { reward: { coins: m.coins, xp: m.xp } };
+}
+
 function summary(c) {
   return { id: c.id, name: c.name, emoji: c.emoji, bio: c.bio, members: c.members.length, max: c.max };
 }
@@ -54,6 +114,7 @@ async function create(uid, playerName, playerAvatar, { name, emoji, bio, max }) 
     createdAt: Date.now(),
     members: [{ uid, name: clean(playerName, 20), avatar: clean(playerAvatar, 8), role: 'leader', at: Date.now() }],
   };
+  ensureMissions(colony); // seed this week's missions on creation
   return { colony, id };
 }
 
@@ -98,6 +159,9 @@ module.exports = {
   create,
   join,
   removeMember,
+  ensureMissions,
+  addProgress,
+  claimMission,
   clean,
   clampMax,
   async list(limit = 50) {
