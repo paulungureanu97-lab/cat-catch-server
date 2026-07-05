@@ -1,7 +1,7 @@
 {
-  "version": "1.21.0",
+  "version": "1.22.0",
   "notes": {
-    "it": "TORNEI GIOCATI — le FAIDE tra colonie! Ora gli scontri del torneo si giocano davvero: quando parte una faida ricevi una notifica, entri e vedi la colonia avversaria. Ogni membro puo attaccare (2 attacchi) i mazzi dei membri avversari: ogni vittoria vale 1 punto per la tua colonia. Sul tabellone vedi i punteggi di ogni scontro e il totale della faida in corso. Una faida dura al massimo 1 giorno: allo scadere (o quando entrambe le colonie hanno esaurito gli attacchi) chi ha piu punti avanza. Campione e finalista ricevono ricompense.",
-    "en": "PLAYED TOURNAMENTS — colony FEUDS! Tournament matches are now really played: when a feud starts you get a notification, enter, and see the rival colony. Each member can attack (2 attacks) the enemy members' decks: every win = 1 point for your colony. The bracket shows each matchup's score and the running feud total. A feud lasts up to 1 day: on expiry (or once both colonies use all attacks) the higher score advances. Champion and finalist get rewards."
+    "it": "Nuovo SFONDO ANIMATO per la Torre del Boss! La battaglia contro il boss ora si svolge davanti a una torre in stile Clash of Clans che prende fuoco, con un video in loop al posto dello sfondo fisso.",
+    "en": "New ANIMATED background for the Boss Tower! Boss battles now happen in front of a Clash-of-Clans-style tower that catches fire — a looping video instead of the static backdrop."
   }
 }
