@@ -1,7 +1,7 @@
 {
-  "version": "1.25.3",
+  "version": "1.25.4",
   "notes": {
-    "it": "Fix sfondi: restano sempre visibili cambiando schermata.",
-    "en": "Background fix: stays visible when switching screens."
+    "it": "Sfondi: correzione + interruttore in Impostazioni per spegnerli.",
+    "en": "Backgrounds: fix + a Settings toggle to turn them off."
   }
 }
