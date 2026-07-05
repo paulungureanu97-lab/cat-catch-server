@@ -239,13 +239,19 @@ wss.on('connection', (ws) => {
       case 'score': {
         // weekly leaderboard: clients push their TOTAL trophies/cats on connect
         // (and before requesting the board), so the in-memory board repopulates
-        // by itself after a free-tier spin-down.
+        // by itself after a free-tier spin-down. Since 1.13.0 the entry also
+        // carries the public player card (avatar/bio/level + battle deck) so
+        // anyone can open a player's profile from the leaderboard.
         lbCheck();
         if (ws.name) {
           lbScores.set(keyOf(ws.name), {
             name: ws.name,
             trophies: Math.max(0, msg.trophies | 0),
             cats: Math.max(0, msg.cats | 0),
+            avatar: String(msg.avatar || '').slice(0, 8),
+            bio: String(msg.bio || '').slice(0, 80),
+            level: Math.max(0, msg.level | 0),
+            deck: Array.isArray(msg.deck) ? msg.deck.slice(0, 12) : [],
             at: Date.now(),
           });
         }
@@ -254,10 +260,22 @@ wss.on('connection', (ws) => {
 
       case 'leaderboard': {
         lbCheck();
+        // slim rows only — decks are fetched per-player via `player-info`
         const entries = [...lbScores.values()]
           .sort((a, b) => b.trophies - a.trophies || b.cats - a.cats)
-          .slice(0, 50);
+          .slice(0, 50)
+          .map(({ name, trophies, cats }) => ({ name, trophies, cats }));
         send(ws, 'leaderboard', { week: lbWeek, entries });
+        break;
+      }
+
+      case 'player-info': {
+        // full public card of one leaderboard player (works while the server
+        // remembers them — they repopulate on their next connect)
+        lbCheck();
+        const e = lbScores.get(keyOf(msg.name));
+        if (e) send(ws, 'player-info', { found: true, ...e });
+        else send(ws, 'player-info', { found: false, name: msg.name });
         break;
       }
 
