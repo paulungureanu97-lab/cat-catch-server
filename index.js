@@ -15,6 +15,7 @@ const http = require('http');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const colonies = require('./colonies');
+const store = require('./store');
 
 const PORT = Number(process.env.PORT) || 8765;
 // Protocol version: bump when the wire format changes incompatibly.
@@ -127,6 +128,7 @@ function lbCheck() {
   if (wk !== lbWeek) {
     lbWeek = wk;
     lbScores.clear();
+    persistLb(); // start the new week durably (an empty board for the new key)
   }
 }
 
@@ -153,6 +155,91 @@ function sanitizeDeck(deck) {
     return card;
   });
 }
+
+// ---- Durable snapshots of the in-memory social state ----
+// The leaderboard, moderation blocks and reports normally live only in memory
+// (fast), but on the Render free tier the instance sleeps after ~15 min idle
+// and loses them — so player rankings would vanish until everyone reconnects.
+// We mirror a SLIM copy to the durable store (Upstash when configured, else the
+// in-memory fallback for local dev) and reload it on boot. Per-card PHOTOS are
+// deliberately NOT persisted (they blow past Upstash's 1MB/request limit and
+// bloat the free DB) — they repopulate cheaply when each player reconnects and
+// re-pushes their score. Writes are debounced so a burst of score pushes = one
+// write, keeping us well under the free tier's monthly command budget.
+const LB_KEY = 'lb:v1'; // { week, scores: [slimEntry...] }
+const BLOCKS_KEY = 'mod:blocks:v1'; // { uid: [catId...] }
+const REPORTS_KEY = 'mod:reports:v1'; // [ {reporter, reported, at} ]
+
+function slimEntry(e) {
+  // keep everything the client reads EXCEPT the heavy per-card photos
+  return {
+    name: e.name,
+    uid: e.uid,
+    trophies: e.trophies,
+    cats: e.cats,
+    avatar: e.avatar,
+    bio: e.bio,
+    level: e.level,
+    at: e.at,
+    deck: Array.isArray(e.deck) ? e.deck.map((c) => ({ ...c, photo: undefined })) : [],
+  };
+}
+
+// coalesce a burst of mutations into a single durable write after `ms` of quiet
+function debounced(fn, ms) {
+  let timer = null;
+  return () => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      Promise.resolve(fn()).catch(() => {});
+    }, ms);
+  };
+}
+
+const persistLb = debounced(
+  () => store.set(LB_KEY, { week: lbWeek, scores: [...lbScores.values()].map(slimEntry) }),
+  4000,
+);
+const persistBlocks = debounced(() => {
+  const obj = {};
+  for (const [uid, set] of blocks) obj[uid] = [...set];
+  return store.set(BLOCKS_KEY, obj);
+}, 2000);
+const persistReports = debounced(() => store.set(REPORTS_KEY, reports.slice(-200)), 2000);
+
+async function loadState() {
+  try {
+    const lb = await store.get(LB_KEY);
+    // only restore if it's still the SAME week (else the board reset while we slept)
+    if (lb && lb.week === weekKey() && Array.isArray(lb.scores)) {
+      lbWeek = lb.week;
+      for (const e of lb.scores) if (e && e.name) lbScores.set(keyOf(e.name), e);
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    const b = await store.get(BLOCKS_KEY);
+    if (b && typeof b === 'object') {
+      for (const uid of Object.keys(b)) if (Array.isArray(b[uid])) blocks.set(uid, new Set(b[uid]));
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    const r = await store.get(REPORTS_KEY);
+    if (Array.isArray(r)) reports.push(...r.slice(-200));
+  } catch {
+    /* ignore */
+  }
+  if (store.durable) {
+    console.log(
+      `[store] state restored — leaderboard:${lbScores.size} blocks:${blocks.size} reports:${reports.length}`,
+    );
+  }
+}
+loadState();
 
 function send(ws, type, payload = {}) {
   if (!ws || ws.readyState !== ws.OPEN) return;
@@ -362,6 +449,7 @@ wss.on('connection', (ws) => {
             deck: sanitizeDeck(msg.deck),
             at: Date.now(),
           });
+          persistLb(); // mirror the ranking durably so it survives a spin-down
         }
         break;
       }
@@ -395,6 +483,7 @@ wss.on('connection', (ws) => {
         if (ws.name && reported && keyOf(reported) !== ws.key) {
           reports.push({ reporter: ws.name, reported, at: Date.now() });
           if (reports.length > 200) reports.shift();
+          persistReports();
           console.log(`[REPORT] ${ws.name} reported ${reported}`);
         }
         break;
@@ -423,6 +512,7 @@ wss.on('connection', (ws) => {
         if (msg.type === 'admin-block') set.add(cat);
         else set.delete(cat);
         const list = blockedList(uid);
+        persistBlocks(); // keep moderation blocks across a server restart
         const target = socketByUid(uid);
         if (target) send(target, 'blocked', { cats: list });
         send(ws, 'admin-ok', { uid, cats: list });
