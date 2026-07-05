@@ -1,7 +1,7 @@
 {
-  "version": "1.22.0",
+  "version": "1.23.0",
   "notes": {
-    "it": "Nuovo SFONDO ANIMATO per la Torre del Boss! La battaglia contro il boss ora si svolge davanti a una torre in stile Clash of Clans che prende fuoco, con un video in loop al posto dello sfondo fisso.",
-    "en": "New ANIMATED background for the Boss Tower! Boss battles now happen in front of a Clash-of-Clans-style tower that catches fire — a looping video instead of the static backdrop."
+    "it": "Sfondo della Torre del Boss migliorato! Ora c'e una torre oscura in stile Clash of Clans con cristalli viola, crepe magiche che pulsano e lava alla base — un video verticale animato che riempie tutto lo schermo.",
+    "en": "Improved Boss Tower background! A dark Clash-of-Clans-style tower with purple crystals, pulsing magic cracks and lava at the base — a full-screen vertical animated video."
   }
 }
