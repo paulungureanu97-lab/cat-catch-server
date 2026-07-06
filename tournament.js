@@ -185,10 +185,15 @@ function start(t, now) {
 }
 
 /** Lazily resolve expired feuds and activate ready next-round feuds. Returns the
- * feud ids that BECAME active this tick (for notifications). */
+ * feud ids that BECAME active this tick (for notifications) plus a `changed`
+ * flag — TRUE whenever ANY state mutated (a feud resolved by deadline, the
+ * tournament finished, ...). Callers MUST persist when changed even if nothing
+ * activated: a final that expires by its deadline mutates state->done with
+ * activated=[] — dropping that save left rewards permanently unclaimable. */
 function tick(t, now) {
-  if (t.state !== 'running') return { activated: [] };
+  if (t.state !== 'running') return { activated: [], changed: false };
   const activated = [];
+  let mutated = false;
   let changed = true;
   while (changed) {
     changed = false;
@@ -197,6 +202,7 @@ function tick(t, now) {
       if (f.state === 'active' && now >= f.deadline) {
         resolveFeud(t, f, now);
         changed = true;
+        mutated = true;
       }
     }
     // activate any pending feud whose both sides are now known
@@ -206,16 +212,18 @@ function tick(t, now) {
         activate(f, now);
         activated.push(id);
         changed = true;
-      } else if (f.state === 'pending' && f.round === t.rounds.length - 1 && (f.aId || f.bId)) {
-        // final with only one arrival can't happen (both feed it) — guard anyway
+        mutated = true;
       }
     }
   }
   // tournament complete?
   const finalId = t.rounds[t.rounds.length - 1][0];
   const finalFeud = t.feuds[finalId];
-  if (finalFeud && finalFeud.state === 'done' && t.state === 'running') finishTournament(t, finalFeud);
-  return { activated };
+  if (finalFeud && finalFeud.state === 'done' && t.state === 'running') {
+    finishTournament(t, finalFeud);
+    mutated = true;
+  }
+  return { activated, changed: mutated };
 }
 
 function finishTournament(t, finalFeud) {
@@ -237,14 +245,18 @@ function sideColony(t, feud, uid) {
 }
 
 /** A member plays one attack in an active feud. `win` + `lanes` come from the
- * on-device battle result. */
-function attack(t, feudId, uid, oppName, win, lanes, now) {
+ * on-device battle result. `attackerColonyId` (optional) is the attacker's
+ * CURRENT colony — when provided it must match their roster side, so someone
+ * who left (or defected to the enemy colony) can no longer score for the old
+ * roster snapshot. */
+function attack(t, feudId, uid, oppName, win, lanes, now, attackerColonyId) {
   const f = t.feuds[feudId];
   if (!f) return { error: 'no-feud' };
   if (f.state !== 'active') return { error: 'not-active' };
   if (now >= f.deadline) return { error: 'expired' };
   const cid = sideColony(t, f, uid);
   if (!cid) return { error: 'not-in-feud' };
+  if (attackerColonyId !== undefined && attackerColonyId !== cid) return { error: 'not-in-feud' };
   if ((f.attacks[uid] || 0) >= MAX_ATTACKS) return { error: 'no-attacks' };
   f.attacks[uid] = (f.attacks[uid] || 0) + 1;
   const w = !!win;
