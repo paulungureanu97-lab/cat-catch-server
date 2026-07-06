@@ -54,14 +54,21 @@ const save = (t) => store.set(CUR, t);
 function join(t, entrant) {
   if (t.state !== 'open') return { error: 'closed' };
   if (!entrant || !entrant.colonyId) return { error: 'bad' };
+  const slim = {
+    colonyId: entrant.colonyId,
+    name: entrant.name,
+    emoji: entrant.emoji,
+    strength: entrant.strength,
+    trophies: entrant.trophies | 0,
+  };
   const i = t.entrants.findIndex((e) => e.colonyId === entrant.colonyId);
   if (i >= 0) {
-    t.entrants[i] = { colonyId: entrant.colonyId, name: entrant.name, emoji: entrant.emoji, strength: entrant.strength };
+    t.entrants[i] = slim;
     t.rosters[entrant.colonyId] = entrant.roster || [];
     return { ok: true, refreshed: true };
   }
   if (t.entrants.length >= MAX_ENTRANTS) return { error: 'full' };
-  t.entrants.push({ colonyId: entrant.colonyId, name: entrant.name, emoji: entrant.emoji, strength: entrant.strength });
+  t.entrants.push(slim);
   t.rosters[entrant.colonyId] = entrant.roster || [];
   return { ok: true };
 }
@@ -70,19 +77,6 @@ function nextPow2(n) {
   let p = 1;
   while (p < n) p <<= 1;
   return p;
-}
-function seedOrder(size) {
-  let order = [0];
-  while (order.length < size) {
-    const n = order.length * 2;
-    const next = [];
-    for (const s of order) {
-      next.push(s);
-      next.push(n - 1 - s);
-    }
-    order = next;
-  }
-  return order;
 }
 const strengthOf = (t, id) => (t.entrants.find((e) => e.colonyId === id) || {}).strength || 0;
 const nameOf = (t, id) => (t.entrants.find((e) => e.colonyId === id) || {}).name || '—';
@@ -141,14 +135,24 @@ function resolveFeud(t, feud, now) {
   propagate(t, feud);
 }
 
-/** Seed the bracket, snapshot rosters, activate round 0. Needs >= 2 entrants. */
+/** Seed the bracket, snapshot rosters, activate round 0. Needs >= 2 entrants.
+ * FAIR MATCHMAKING: colonies are sorted by TROPHIES (fallback strength) and
+ * paired ADJACENT (1st vs 2nd, 3rd vs 4th, ...) so every feud is between
+ * colonies of similar level — the old 1-vs-N seeding pitted the strongest
+ * against the weakest in round 1. Byes go to the top seeds. */
 function start(t, now) {
   if (t.state !== 'open') return { error: 'closed' };
   if (t.entrants.length < 2) return { error: 'not-enough' };
-  const seeded = [...t.entrants].sort((a, b) => b.strength - a.strength).map((e) => e.colonyId);
+  const seeded = [...t.entrants]
+    .sort((a, b) => (b.trophies | 0) - (a.trophies | 0) || b.strength - a.strength)
+    .map((e) => e.colonyId);
   const size = nextPow2(seeded.length);
-  const order = seedOrder(size);
-  const slots = order.map((i) => seeded[i] || null); // null = bye
+  const numByes = size - seeded.length;
+  // byed pairs first (top seeds skip round 0), then the rest paired adjacent —
+  // this also guarantees no (bye vs bye) pair, which would hang the bracket
+  const slots = [];
+  for (let i = 0; i < numByes; i++) slots.push(seeded[i], null);
+  for (let i = numByes; i < seeded.length; i++) slots.push(seeded[i]);
   const roundCount = Math.log2(size);
   // pre-create every feud slot in every round
   t.rounds = [];
