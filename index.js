@@ -149,7 +149,9 @@ function colonyRoster(colony) {
   });
 }
 
-/** push the current tournament to every online member of an entrant colony */
+/** push the current tournament to every online member of an entrant colony.
+ * NOTE: no `last` field here — an explicit last:null would wipe the client's
+ * cached previous-week archive on every push. */
 async function pushTournament(t) {
   if (!t || !Array.isArray(t.entrants)) return;
   for (const ent of t.entrants) {
@@ -157,7 +159,7 @@ async function pushTournament(t) {
     if (!c) continue;
     for (const m of c.members) {
       const s = socketByUid(m.uid);
-      if (s) send(s, 'tour-info', { tournament: t, last: null });
+      if (s) send(s, 'tour-info', { tournament: t, maxAttacks: tournament.MAX_ATTACKS });
     }
   }
 }
@@ -654,6 +656,11 @@ wss.on('connection', (ws) => {
           const c = await colonies.myColony(ws.uid);
           if (!c || !colonies.canManage(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
           const target = String(msg.uid || '');
+          // the target must STILL be a member — kicking someone who already left
+          // would clearMember() their pointer to whatever NEW colony they joined
+          if (!c.members.some((m) => m.uid === target)) {
+            return send(ws, 'colony-error', { reason: 'bad-target' });
+          }
           if (target === ws.uid || colonies.roleOf(c, target) === 'leader') {
             return send(ws, 'colony-error', { reason: 'bad-target' });
           }
@@ -737,15 +744,18 @@ wss.on('connection', (ws) => {
       case 'tour-info': {
         withTourLock(async () => {
           const t = await tournament.current();
-          // lazily resolve expired feuds / activate ready rounds on every read
-          const { activated } = tournament.tick(t, Date.now());
-          if (activated.length) {
+          // lazily resolve expired feuds / activate ready rounds on every read.
+          // Save on ANY mutation — a deadline-expired final flips the tournament
+          // to done with nothing newly activated, and losing that save made the
+          // rewards permanently unclaimable (claim re-reads the stored object).
+          const { activated, changed } = tournament.tick(t, Date.now());
+          if (activated.length || changed) {
             await tournament.save(t);
             await pushFeudStart(t, activated);
             await pushTournament(t);
           }
           const lt = await tournament.last();
-          send(ws, 'tour-info', { tournament: t, last: lt || null });
+          send(ws, 'tour-info', { tournament: t, last: lt || null, maxAttacks: tournament.MAX_ATTACKS });
         }).catch(() => {});
         break;
       }
@@ -762,7 +772,7 @@ wss.on('connection', (ws) => {
           if (r.error) return send(ws, 'tour-error', { reason: r.error });
           await tournament.save(t);
           await pushTournament(t);
-          send(ws, 'tour-info', { tournament: t, last: null });
+          send(ws, 'tour-info', { tournament: t, maxAttacks: tournament.MAX_ATTACKS });
         }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
       }
@@ -787,10 +797,21 @@ wss.on('connection', (ws) => {
         // a member reports a played feud battle (win/loss + lanes won)
         withTourLock(async () => {
           if (!ws.uid) return send(ws, 'tour-error', { reason: 'no-uid' });
+          const c = await colonies.myColony(ws.uid); // current membership check
           const t = await tournament.current();
-          const r = tournament.attack(t, String(msg.feudId || ''), ws.uid, msg.oppName, !!msg.win, msg.lanes | 0, Date.now());
-          if (r.error) return send(ws, 'tour-error', { reason: r.error });
+          const now = Date.now();
+          // resolve any expiry FIRST so a post-deadline attack is refused cleanly
+          const pre = tournament.tick(t, now);
+          const r = tournament.attack(t, String(msg.feudId || ''), ws.uid, msg.oppName, !!msg.win, msg.lanes | 0, now, c ? c.id : null);
+          if (r.error) {
+            if (pre.activated.length || pre.changed) {
+              await tournament.save(t);
+              await pushTournament(t);
+            }
+            return send(ws, 'tour-error', { reason: r.error });
+          }
           await tournament.save(t);
+          await pushFeudStart(t, pre.activated);
           await pushTournament(t);
         }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
@@ -802,11 +823,17 @@ wss.on('connection', (ws) => {
           const c = await colonies.myColony(ws.uid);
           if (!c) return send(ws, 'tour-error', { reason: 'not-in' });
           const t = await tournament.current();
+          // tick first: the final may have expired since the last read — without
+          // this the stored state can still say 'running' and claim fails forever
+          const pre = tournament.tick(t, Date.now());
           const r = tournament.claim(t, c.id, ws.uid);
-          if (r.error) return send(ws, 'tour-error', { reason: r.error });
+          if (r.error) {
+            if (pre.activated.length || pre.changed) await tournament.save(t);
+            return send(ws, 'tour-error', { reason: r.error });
+          }
           await tournament.save(t);
           send(ws, 'tour-reward', { coins: r.reward.coins, xp: r.reward.xp, place: r.reward.place });
-          send(ws, 'tour-info', { tournament: t, last: null });
+          send(ws, 'tour-info', { tournament: t, maxAttacks: tournament.MAX_ATTACKS });
         }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
       }
