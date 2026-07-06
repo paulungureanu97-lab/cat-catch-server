@@ -1,7 +1,7 @@
 {
   "version": "1.26.1",
   "notes": {
-    "it": "Le partite normali ora scalano con i tuoi trofei, la finestra equipaggiamenti scorre, tornei tra colonie con trofei simili. Bug fix.",
-    "en": "Normal battles now scale with your trophies, the equipment picker scrolls, colony tournaments match similar trophies. Bug fixes."
+    "it": "Bug fix.",
+    "en": "Bug fix."
   }
 }
