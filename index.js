@@ -126,16 +126,18 @@ function deckPower(deck) {
 }
 function colonyStrength(colony) {
   let total = 0;
+  let trophies = 0;
   let champion = { name: '', power: 0 };
   for (const m of colony.members) {
     const e = lbScores.get(keyOf(m.name || ''));
     const p = e ? deckPower(e.deck) : 0;
     const val = p > 0 ? p : e ? e.trophies | 0 : 0;
     total += val;
+    trophies += e ? Math.max(0, e.trophies | 0) : 0;
     if (val > champion.power) champion = { name: m.name || '', power: val };
   }
   if (total <= 0) total = colony.members.length * 10; // floor so a colony still beats a bye
-  return { strength: total, champion };
+  return { strength: total, trophies, champion };
 }
 
 /** A colony's tournament roster: each member with their champion deck (from the
@@ -767,8 +769,8 @@ wss.on('connection', (ws) => {
           if (!c) return send(ws, 'tour-error', { reason: 'not-in' });
           if (!colonies.canManage(c, ws.uid)) return send(ws, 'tour-error', { reason: 'auth' });
           const t = await tournament.current();
-          const { strength } = colonyStrength(c);
-          const r = tournament.join(t, { colonyId: c.id, name: c.name, emoji: c.emoji, strength, roster: colonyRoster(c) });
+          const { strength, trophies } = colonyStrength(c);
+          const r = tournament.join(t, { colonyId: c.id, name: c.name, emoji: c.emoji, strength, trophies, roster: colonyRoster(c) });
           if (r.error) return send(ws, 'tour-error', { reason: r.error });
           await tournament.save(t);
           await pushTournament(t);
