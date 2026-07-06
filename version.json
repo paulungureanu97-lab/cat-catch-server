@@ -1,7 +1,7 @@
 {
-  "version": "1.26.0",
+  "version": "1.26.1",
   "notes": {
-    "it": "2 nuove torri (Sfinge e Pantera) con carta finale, trasferimento equip in un tocco, 40 nuovi avatar, sfondi animati corretti, fix colonie.",
-    "en": "2 new towers (Sphinx and Panther) with a final card, one-tap gear transfer, 40 new avatars, fixed animated backgrounds, colony fixes."
+    "it": "Le partite normali ora scalano con i tuoi trofei, la finestra equipaggiamenti scorre, tornei tra colonie con trofei simili. Bug fix.",
+    "en": "Normal battles now scale with your trophies, the equipment picker scrolls, colony tournaments match similar trophies. Bug fixes."
   }
 }
