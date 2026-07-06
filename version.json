@@ -1,7 +1,7 @@
 {
-  "version": "1.25.5",
+  "version": "1.26.0",
   "notes": {
-    "it": "Sfondi statici di default. Puoi provare quelli animati da Impostazioni.",
-    "en": "Static backgrounds by default. Try animated ones from Settings."
+    "it": "2 nuove torri (Sfinge e Pantera) con carta finale, trasferimento equip in un tocco, 40 nuovi avatar, sfondi animati corretti, fix colonie.",
+    "en": "2 new towers (Sphinx and Panther) with a final card, one-tap gear transfer, 40 new avatars, fixed animated backgrounds, colony fixes."
   }
 }
