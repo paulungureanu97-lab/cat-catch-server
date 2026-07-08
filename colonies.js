@@ -30,6 +30,9 @@ const MISSION_POOL = [
   { type: 'battle', goal: 40, coins: 55, xp: 40 },
   { type: 'rare', goal: 12, coins: 100, xp: 60 },
   { type: 'perfect', goal: 20, coins: 75, xp: 45 },
+  { type: 'care', goal: 30, coins: 70, xp: 45 },
+  { type: 'catch', goal: 70, coins: 110, xp: 65 },
+  { type: 'win', goal: 45, coins: 150, xp: 90 },
 ];
 const MISSION_COUNT = 3;
 const weekId = () => 'w' + Math.floor((Date.now() / 86400000 - 4) / 7);
