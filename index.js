@@ -118,6 +118,51 @@ function pushColony(colony) {
   }
 }
 
+// ---- Chat: colony broadcast + friend DMs, with a small durable ring buffer ----
+// Lazy in-memory cache (loaded from store on first access), capped per thread and
+// mirrored to store.js so offline members/friends catch up on reconnect.
+const COL_CHAT_MAX = 50;
+const DM_CHAT_MAX = 30;
+const colChatCache = new Map(); // colonyId -> msgs[]
+const dmChatCache = new Map(); // pairKey -> msgs[]
+const dmPair = (a, b) => [keyOf(a), keyOf(b)].sort().join('|');
+
+async function getColChat(id) {
+  if (colChatCache.has(id)) return colChatCache.get(id);
+  let msgs = [];
+  try {
+    const v = await store.get(`chat:col:${id}`);
+    if (Array.isArray(v)) msgs = v;
+  } catch {
+    /* ignore */
+  }
+  colChatCache.set(id, msgs);
+  return msgs;
+}
+async function getDmChat(key) {
+  if (dmChatCache.has(key)) return dmChatCache.get(key);
+  let msgs = [];
+  try {
+    const v = await store.get(`chat:dm:${key}`);
+    if (Array.isArray(v)) msgs = v;
+  } catch {
+    /* ignore */
+  }
+  dmChatCache.set(key, msgs);
+  return msgs;
+}
+function pushMsg(msgs, m, max) {
+  msgs.push(m);
+  if (msgs.length > max) msgs.splice(0, msgs.length - max);
+}
+// simple per-socket token bucket: at most 6 chat/dm messages per 4s
+function chatAllowed(ws) {
+  const now = Date.now();
+  if (!ws._chat || now - ws._chat.t > 4000) ws._chat = { t: now, n: 0 };
+  ws._chat.n += 1;
+  return ws._chat.n <= 6;
+}
+
 /** A colony's tournament strength = sum of members' best-deck power (fallback to
  * their trophies, then a small floor by size), plus its strongest member as the
  * "champion" shown in the bracket. Uses the live leaderboard decks in lbScores. */
@@ -738,6 +783,64 @@ wss.on('connection', (ws) => {
           if (msg.max != null) c.max = Math.max(c.members.length, colonies.clampMax(msg.max));
           await colonies.save(c);
           pushColony(c);
+        })().catch(() => {});
+        break;
+      }
+
+      // ---- Chat: colony group chat + friend DMs ----
+      case 'colony-chat': {
+        (async () => {
+          if (!ws.uid || !chatAllowed(ws)) return;
+          const text = String(msg.text || '').trim().slice(0, 300);
+          if (!text) return;
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return;
+          const m = { uid: ws.uid, name: ws.name, avatar: ws.avatar || '', text, at: Date.now() };
+          const hist = await getColChat(c.id);
+          pushMsg(hist, m, COL_CHAT_MAX);
+          store.set(`chat:col:${c.id}`, hist).catch(() => {});
+          for (const mem of c.members) {
+            const s = socketByUid(mem.uid);
+            if (s) send(s, 'colony-msg', m); // includes the sender -> their thread updates
+          }
+        })().catch(() => {});
+        break;
+      }
+
+      case 'colony-chat-fetch': {
+        (async () => {
+          if (!ws.uid) return;
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return;
+          send(ws, 'colony-chat-history', { messages: await getColChat(c.id) });
+        })().catch(() => {});
+        break;
+      }
+
+      case 'dm': {
+        (async () => {
+          if (!ws.name || !chatAllowed(ws)) return;
+          const to = String(msg.to || '').trim().slice(0, 20);
+          const text = String(msg.text || '').trim().slice(0, 300);
+          if (!to || !text) return;
+          const m = { from: ws.name, to, text, at: Date.now() };
+          const key = dmPair(ws.name, to);
+          const hist = await getDmChat(key);
+          pushMsg(hist, m, DM_CHAT_MAX);
+          store.set(`chat:dm:${key}`, hist).catch(() => {});
+          const target = clients.get(keyOf(to));
+          if (target && target !== ws) send(target, 'dm', m);
+          send(ws, 'dm', m); // echo to sender so their own thread updates
+        })().catch(() => {});
+        break;
+      }
+
+      case 'dm-fetch': {
+        (async () => {
+          if (!ws.name) return;
+          const to = String(msg.to || '').trim().slice(0, 20);
+          if (!to) return;
+          send(ws, 'dm-history', { with: to, messages: await getDmChat(dmPair(ws.name, to)) });
         })().catch(() => {});
         break;
       }
