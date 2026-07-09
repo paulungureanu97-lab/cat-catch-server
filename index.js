@@ -22,6 +22,15 @@ const PORT = Number(process.env.PORT) || 8765;
 // Protocol version: bump when the wire format changes incompatibly.
 // v2 = public profiles (hello carries avatar/bio). Old clients/servers are refused.
 const PROTO = 2;
+// Shared app key: the official app sends this in `hello.app`; clients that don't
+// match are refused (blocks casual clones from parasiting the backend). The key
+// lives ONLY in the environment (never hardcoded here, so it can't be lifted from
+// source) — set the Render env var APP_KEY to the client's key. When UNSET the
+// check is disabled, so local dev + the test bots keep working without it.
+const APP_KEY = process.env.APP_KEY || '';
+if (!APP_KEY) {
+  console.warn('[app-key] APP_KEY env var is not set — client app-key check is DISABLED.');
+}
 
 // ---- HTTP: in-app update channel (same port as the ws relay) ----
 // GET /version  -> contents of server/version.json ({version, notes})
@@ -405,6 +414,11 @@ wss.on('connection', (ws) => {
     switch (msg.type) {
       case 'hello': {
         if ((Number(msg.proto) || 1) < PROTO) {
+          return send(ws, 'hello-error', { reason: 'old-client', proto: PROTO });
+        }
+        // reject anything that isn't the official app (or an old app version that
+        // predates the app-key). Same 'old-client' reason -> client shows "update".
+        if (APP_KEY && String(msg.app || '') !== APP_KEY) {
           return send(ws, 'hello-error', { reason: 'old-client', proto: PROTO });
         }
         const name = String(msg.name || '').trim().slice(0, 20);
