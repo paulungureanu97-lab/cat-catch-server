@@ -107,6 +107,7 @@ function broadcastLoadIfChanged() {
 const ADMIN_KEY = String(process.env.ADMIN_KEY || '');
 const reports = []; // { reporter, reported, at } — newest last, capped
 const blocks = new Map(); // uid -> Set(catId) blocked for that player
+const pendingGrants = new Map(); // uid -> { admin, gems, coins, at } awaiting granted-ack
 const isAdmin = (key) => ADMIN_KEY.length > 0 && String(key || '') === ADMIN_KEY;
 function blockedList(uid) {
   const set = blocks.get(String(uid || ''));
@@ -661,16 +662,36 @@ wss.on('connection', (ws) => {
 
       case 'admin-grant': {
         // admin credits a premium purchase (gems/coins bought with real money,
-        // fulfilled manually) to an ONLINE player by name
+        // fulfilled manually) to an ONLINE player. Targets the stable per-
+        // install UID (names are spoofable — anyone can rename to the buyer's
+        // name while they're offline and intercept the credit). The admin-ok
+        // is only sent AFTER the client acknowledges via granted-ack, so a
+        // ghost socket or an old app version reads as a timeout, not success.
         if (!isAdmin(msg.key)) return send(ws, 'admin-error', { reason: 'auth' });
-        const to = String(msg.to || '').slice(0, 20);
+        const uid = String(msg.uid || '').slice(0, 40);
         const gems = Math.max(0, Math.min(100000, msg.gems | 0));
         const coins = Math.max(0, Math.min(1000000, msg.coins | 0));
-        if (!to || (gems === 0 && coins === 0)) return send(ws, 'admin-error', { reason: 'bad-args' });
-        const target = clients.get(keyOf(to));
+        if (!uid || (gems === 0 && coins === 0)) return send(ws, 'admin-error', { reason: 'bad-args' });
+        const target = socketByUid(uid);
         if (!target) return send(ws, 'admin-error', { reason: 'offline' });
+        pendingGrants.set(uid, { admin: ws, gems, coins, at: Date.now() });
         send(target, 'granted', { gems, coins });
-        send(ws, 'admin-ok', { to, gems, coins });
+        break;
+      }
+
+      case 'granted-ack': {
+        // the buyer's client confirms the credit landed — release the admin-ok
+        const p = ws.uid ? pendingGrants.get(ws.uid) : null;
+        if (!p) break;
+        pendingGrants.delete(ws.uid);
+        send(p.admin, 'admin-ok', {
+          uid: ws.uid,
+          name: ws.name,
+          avatar: ws.avatar || '',
+          gems: p.gems,
+          coins: p.coins,
+          delivered: true,
+        });
         break;
       }
 
