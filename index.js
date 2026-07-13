@@ -659,6 +659,21 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'admin-grant': {
+        // admin credits a premium purchase (gems/coins bought with real money,
+        // fulfilled manually) to an ONLINE player by name
+        if (!isAdmin(msg.key)) return send(ws, 'admin-error', { reason: 'auth' });
+        const to = String(msg.to || '').slice(0, 20);
+        const gems = Math.max(0, Math.min(100000, msg.gems | 0));
+        const coins = Math.max(0, Math.min(1000000, msg.coins | 0));
+        if (!to || (gems === 0 && coins === 0)) return send(ws, 'admin-error', { reason: 'bad-args' });
+        const target = clients.get(keyOf(to));
+        if (!target) return send(ws, 'admin-error', { reason: 'offline' });
+        send(target, 'granted', { gems, coins });
+        send(ws, 'admin-ok', { to, gems, coins });
+        break;
+      }
+
       // ---- Colonies (clans) — Phase 1 ----
       case 'colony-list': {
         colonies
