@@ -16,6 +16,7 @@ const path = require('path');
 const { WebSocketServer } = require('ws');
 const colonies = require('./colonies');
 const tournament = require('./tournament');
+const bots = require('./bots');
 const store = require('./store');
 
 const PORT = Number(process.env.PORT) || 8765;
@@ -903,7 +904,11 @@ wss.on('connection', (ws) => {
           // Save on ANY mutation — a deadline-expired final flips the tournament
           // to done with nothing newly activated, and losing that save made the
           // rewards permanently unclaimable (claim re-reads the stored object).
-          const { activated, changed } = tournament.tick(t, Date.now());
+          const now = Date.now();
+          // tickBots is the single driver: it simulates bot attacks BEFORE
+          // resolving deadlines (a bare tick() first would settle a bot feud
+          // 0-0 by seed) and runs tick() internally, returning its activations.
+          const { activated, changed } = tournament.tickBots(t, now);
           if (activated.length || changed) {
             await tournament.save(t);
             await pushFeudStart(t, activated);
@@ -939,10 +944,15 @@ wss.on('connection', (ws) => {
           if (!c || !colonies.canManage(c, ws.uid)) return send(ws, 'tour-error', { reason: 'auth' });
           const t = await tournament.current();
           if (!t.entrants.some((e) => e.colonyId === c.id)) return send(ws, 'tour-error', { reason: 'not-entrant' });
-          const r = tournament.start(t, Date.now());
+          // top the field up to a power-of-two with BOT colonies (no byes) so a
+          // war can run even with 1 real colony — see bots.js
+          bots.padWithBots(t);
+          const now = Date.now();
+          const r = tournament.start(t, now);
           if (r.error) return send(ws, 'tour-error', { reason: r.error });
+          const bot = tournament.tickBots(t, now); // resolve any bot-vs-bot round-0 feuds at once
           await tournament.save(t);
-          await pushFeudStart(t, r.activated || []);
+          await pushFeudStart(t, [...(r.activated || []), ...bot.activated]);
           await pushTournament(t);
         }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
@@ -955,18 +965,23 @@ wss.on('connection', (ws) => {
           const c = await colonies.myColony(ws.uid); // current membership check
           const t = await tournament.current();
           const now = Date.now();
-          // resolve any expiry FIRST so a post-deadline attack is refused cleanly
-          const pre = tournament.tick(t, now);
+          // resolve any expiry FIRST (bot-aware: simulates bot scores before
+          // settling deadlines) so a post-deadline attack is refused cleanly
+          const pre = tournament.tickBots(t, now);
           const r = tournament.attack(t, String(msg.feudId || ''), ws.uid, msg.oppName, !!msg.win, msg.lanes | 0, now, c ? c.id : null);
           if (r.error) {
             if (pre.activated.length || pre.changed) {
               await tournament.save(t);
+              await pushFeudStart(t, pre.activated);
               await pushTournament(t);
             }
             return send(ws, 'tour-error', { reason: r.error });
           }
+          // advance the bot side too (and fast-forward + resolve if this attack
+          // exhausted the human side's attacks)
+          const post = tournament.tickBots(t, now);
           await tournament.save(t);
-          await pushFeudStart(t, pre.activated);
+          await pushFeudStart(t, [...pre.activated, ...(r.activated || []), ...post.activated]);
           await pushTournament(t);
         }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
@@ -980,7 +995,11 @@ wss.on('connection', (ws) => {
           const t = await tournament.current();
           // tick first: the final may have expired since the last read — without
           // this the stored state can still say 'running' and claim fails forever
-          const pre = tournament.tick(t, Date.now());
+          const nowC = Date.now();
+          // bot-aware tick FIRST (simulate before deadline-settling) — the final
+          // may have expired since the last read, and a plain tick would hand a
+          // bot feud a 0-0 seed win before the bot ever scored
+          const pre = tournament.tickBots(t, nowC);
           const r = tournament.claim(t, c.id, ws.uid);
           if (r.error) {
             if (pre.activated.length || pre.changed) await tournament.save(t);
