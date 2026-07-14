@@ -129,6 +129,9 @@ function resolveFeud(t, feud, now) {
   if (feud.state === 'done') return;
   let winner;
   if (feud.aScore !== feud.bScore) winner = feud.aScore > feud.bScore ? feud.aId : feud.bId;
+  // tie vs a BOT -> the real colony wins (bot summed strength is inflated by
+  // roster size, so the old higher-seed rule handed every tie to the bot)
+  else if (isBot(feud.aId) !== isBot(feud.bId)) winner = isBot(feud.aId) ? feud.bId : feud.aId;
   else winner = strengthOf(t, feud.aId) >= strengthOf(t, feud.bId) ? feud.aId : feud.bId; // tie -> higher seed
   feud.winnerId = winner;
   feud.state = 'done';
@@ -235,9 +238,36 @@ function finishTournament(t, finalFeud) {
   const champId = finalFeud.winnerId;
   t.winner = champId ? { colonyId: champId, name: nameOf(t, champId), emoji: emojiOf(t, champId) } : null;
   t.rewards = {};
-  if (champId) t.rewards[champId] = { ...REWARDS[1], place: 1 };
   const loserId = finalFeud.winnerId === finalFeud.aId ? finalFeud.bId : finalFeud.aId;
-  if (loserId) t.rewards[loserId] = { ...REWARDS[2], place: 2 };
+  // bots can't claim, so a bot on the podium would LOCK that reward away —
+  // redirect podium places to the best-placed REAL colonies (bracket/winner
+  // still show the truth; only the claimable rewards move).
+  let first = champId && !isBot(champId) ? champId : null;
+  let second = loserId && !isBot(loserId) ? loserId : null;
+  if (!first && second) {
+    first = second; // real finalist beaten by a bot champion -> takes place 1
+    second = null;
+  }
+  if (!first || !second) {
+    // fill remaining podium spots with the real colonies eliminated deepest
+    const placed = new Set([first, second].filter(Boolean));
+    outer: for (let r = t.rounds.length - 1; r >= 0; r--) {
+      for (const fid of t.rounds[r]) {
+        const f = t.feuds[fid];
+        if (!f) continue;
+        for (const cid of [f.aId, f.bId]) {
+          if (cid && !isBot(cid) && !placed.has(cid)) {
+            if (!first) first = cid;
+            else if (!second) second = cid;
+            placed.add(cid);
+            if (first && second) break outer;
+          }
+        }
+      }
+    }
+  }
+  if (first) t.rewards[first] = { ...REWARDS[1], place: 1 };
+  if (second) t.rewards[second] = { ...REWARDS[2], place: 2 };
 }
 
 /** Which colony (a or b) a uid belongs to in a feud, or null. */
@@ -279,8 +309,9 @@ function attack(t, feudId, uid, oppName, win, lanes, now, attackerColonyId) {
   };
   if (usedAll(f.aId) && usedAll(f.bId)) resolveFeud(t, f, now);
   const done = f.state === 'done';
-  if (done) tick(t, now);
-  return { ok: true, attacksLeft: MAX_ATTACKS - f.attacks[uid], resolved: done };
+  let activated = [];
+  if (done) activated = tick(t, now).activated; // next-round feuds this resolution unlocked
+  return { ok: true, attacksLeft: MAX_ATTACKS - f.attacks[uid], resolved: done, activated };
 }
 
 function claim(t, colonyId, uid) {
@@ -292,4 +323,117 @@ function claim(t, colonyId, uid) {
   return { reward: { coins: r.coins, xp: r.xp, place: r.place } };
 }
 
-module.exports = { current, last, save, join, start, tick, attack, claim, weekId, MAX_ENTRANTS, MAX_ATTACKS, DAY, REWARDS };
+// ---- bot colonies (see bots.js) — a bot has no device to play on, so the server
+// SIMULATES its feud attacks here. Real players still battle the bot's decks
+// on-device exactly like a human opponent; this only drives the bot's own score. ----
+
+const isBot = (id) => typeof id === 'string' && id.indexOf('bot:') === 0;
+
+/** true when every roster member of `colId` has used all their attacks (or the
+ * roster is empty). Same rule as attack()'s early-finish, reused for bot feuds. */
+function membersExhausted(t, f, colId) {
+  const roster = t.rosters[colId] || [];
+  if (!roster.length) return true;
+  return roster.every((m) => (f.attacks[m.uid] || 0) >= MAX_ATTACKS);
+}
+
+/** Bot win chance per simulated attack, from relative PER-MEMBER strength (total
+ * strength is a sum over members, so comparing totals let member COUNT — not deck
+ * quality — pin the probability at the ceiling vs small colonies). Centered
+ * slightly BELOW 0.5 so an ACTIVE human colony that wins its battles beats the
+ * bot, while an ABSENT one still loses to it (keeps stakes real). Tunable. */
+function botWinProb(t, botId, oppId) {
+  const per = (id) => (strengthOf(t, id) || 1) / Math.max(1, (t.rosters[id] || []).length);
+  const bs = per(botId);
+  const os = per(oppId);
+  const p = 0.45 + 0.4 * ((bs - os) / (bs + os));
+  return Math.max(0.2, Math.min(0.62, p));
+}
+
+/** Simulate bot-colony attacks in active feuds. A bot PACES its attacks across the
+ * 24h window so the score climbs live; a feud where the human side already used
+ * every attack — or that is bot-vs-bot — is fast-forwarded and resolved at once so
+ * the bracket never stalls. Cascades (via tick) until stable. `rng` is injectable
+ * for deterministic tests. Returns true if anything changed. */
+function tickBots(t, now, rng) {
+  if (t.state !== 'running') return { activated: [], changed: false };
+  const r = typeof rng === 'function' ? rng : Math.random;
+  const activated = [];
+  let any = false;
+  let changed = true;
+  let guard = 0;
+  while (changed && guard++ < 128) {
+    changed = false;
+    // 1) simulate bot attacks BEFORE resolving deadlines — so an ABSENT human
+    //    loses to a bot that accrued points over the window (rather than a 0-0
+    //    tie broken by seed) once the feud is read after its deadline.
+    for (const id of Object.keys(t.feuds)) {
+      const f = t.feuds[id];
+      if (f.state !== 'active') continue;
+      const aBot = isBot(f.aId);
+      const bBot = isBot(f.bId);
+      if (!aBot && !bBot) continue;
+      for (const side of ['a', 'b']) {
+        const cid = side === 'a' ? f.aId : f.bId;
+        if (!isBot(cid)) continue;
+        const oppId = side === 'a' ? f.bId : f.aId;
+        const roster = t.rosters[cid] || [];
+        if (!roster.length) continue;
+        // FAIRNESS: the bot's attack budget is capped at the OPPONENT side's
+        // capacity — raw win-counts are compared at resolve, so a 3-member bot
+        // with 6 attacks would structurally bury a solo colony's max 2 wins.
+        const oppMembers = Math.max(1, (t.rosters[oppId] || []).length);
+        const cap = Math.min(roster.length, oppMembers) * MAX_ATTACKS;
+        // fast-forward when there's no human left to wait for (bot-vs-bot, human
+        // exhausted, or the deadline passed), else pace by elapsed time
+        const fastForward = (aBot && bBot) || membersExhausted(t, f, oppId) || now >= f.deadline;
+        const frac = Math.max(0, Math.min(1, (now - (f.deadline - DAY)) / DAY));
+        const target = fastForward ? cap : Math.floor(frac * cap);
+        let done = roster.reduce((s, m) => s + Math.min(MAX_ATTACKS, f.attacks[m.uid] || 0), 0);
+        const oppRoster = t.rosters[oppId] || [];
+        const p = botWinProb(t, cid, oppId);
+        while (done < target) {
+          const m = roster.find((mm) => (f.attacks[mm.uid] || 0) < MAX_ATTACKS);
+          if (!m) break;
+          f.attacks[m.uid] = (f.attacks[m.uid] || 0) + 1;
+          const win = r() < p;
+          const opp = oppRoster.length ? oppRoster[Math.floor(r() * oppRoster.length)] : null;
+          f.log.push({ colonyId: cid, byUid: m.uid, byName: m.name, oppName: opp ? opp.name : '—', win, lanes: win ? 2 : 1, at: now, bot: true });
+          if (f.log.length > 200) f.log.shift();
+          if (win) {
+            if (cid === f.aId) f.aScore += 1;
+            else f.bScore += 1;
+          }
+          done += 1;
+          changed = true;
+          any = true;
+        }
+      }
+      // a bot side is "exhausted" once it reached its (possibly capped) budget:
+      // when both sides can do nothing more, close the feud early
+      const sideDone = (colId, otherId) => {
+        if (!isBot(colId)) return membersExhausted(t, f, colId);
+        const cap = Math.min((t.rosters[colId] || []).length, Math.max(1, (t.rosters[otherId] || []).length)) * MAX_ATTACKS;
+        const used = (t.rosters[colId] || []).reduce((s, m) => s + Math.min(MAX_ATTACKS, f.attacks[m.uid] || 0), 0);
+        return used >= cap;
+      };
+      if (f.state === 'active' && sideDone(f.aId, f.bId) && sideDone(f.bId, f.aId)) {
+        resolveFeud(t, f, now);
+        changed = true;
+        any = true;
+      }
+    }
+    // 2) resolve deadlines, activate ready feuds, finish the tournament —
+    //    COLLECT the activated feud ids (they drive the feud-start notification;
+    //    dropping them silenced every bot-driven round advance)
+    const res = tick(t, now);
+    if (res.activated.length) activated.push(...res.activated);
+    if (res.changed) {
+      changed = true;
+      any = true;
+    }
+  }
+  return { activated: [...new Set(activated)], changed: any };
+}
+
+module.exports = { current, last, save, join, start, tick, tickBots, isBot, attack, claim, weekId, MAX_ENTRANTS, MAX_ATTACKS, DAY, REWARDS };
