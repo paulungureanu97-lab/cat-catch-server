@@ -222,6 +222,67 @@ async function pushTournament(t) {
   }
 }
 
+// ---- feud battle replays (colony-mates can rewatch each other's attacks) ----
+// Replays are version-proof EVENT LOGS (per-turn board snapshots recorded by the
+// attacker's client), never an engine re-run — so viewers on other app versions
+// replay them identically. Stored OUTSIDE the tournament object (which must stay
+// small for the single durable key) in per-feud ring keys, capped, and dropped
+// at the weekly rollover (see tournament.current()).
+const REPLAYS_PER_FEUD = 10; // ring: newest wins
+const REPLAY_MAX_BYTES = 30000;
+const REPLAY_TTL_S = 8 * 86400; // 8 days — outlives one week; a backstop so an
+// orphaned ring self-expires even if the weekly-rollover cleanup del is missed
+const replayKey = (week, feudId) => `replays:${week}:${feudId}`;
+
+/** Whitelist-copy an incoming replay (untrusted, from a client). Returns null if
+ * the shape is wrong or it exceeds the size cap. */
+function sanitizeReplay(r) {
+  if (!r || typeof r !== 'object' || !Array.isArray(r.turns)) return null;
+  const str = (v, n) => String(v == null ? '' : v).slice(0, n);
+  const card = (c) => ({
+    name: str(c && c.name, 16),
+    rarity: str(c && c.rarity, 10),
+    tribe: str(c && c.tribe, 12),
+    power: (c && c.power) | 0,
+    cost: (c && c.cost) | 0,
+  });
+  const out = {
+    v: 1,
+    by: str(r.by, 20),
+    opp: str(r.opp, 20),
+    win: !!r.win,
+    lanes: r.lanes | 0,
+    at: r.at | 0,
+    turns: r.turns.slice(0, 8).map((tn) => ({
+      lanes: (Array.isArray(tn && tn.lanes) ? tn.lanes : []).slice(0, 3).map((l) => ({
+        me: (Array.isArray(l && l.me) ? l.me : []).slice(0, 8).map(card),
+        foe: (Array.isArray(l && l.foe) ? l.foe : []).slice(0, 8).map(card),
+      })),
+      scores: (Array.isArray(tn && tn.scores) ? tn.scores : []).slice(0, 3).map((s) => [
+        (Array.isArray(s) ? s[0] : 0) | 0,
+        (Array.isArray(s) ? s[1] : 0) | 0,
+      ]),
+    })),
+  };
+  try {
+    if (JSON.stringify(out).length > REPLAY_MAX_BYTES) return null;
+  } catch {
+    return null;
+  }
+  return out;
+}
+
+/** push a live feed event to every ONLINE member of the attacker's colony
+ * (same-colony only — enemies never see your replays or your feed). */
+async function pushFeudAttack(colonyId, payload) {
+  const c = await colonies.get(colonyId);
+  if (!c) return;
+  for (const m of c.members) {
+    const s = socketByUid(m.uid);
+    if (s) send(s, 'feud-attack', payload);
+  }
+}
+
 // All tournament state lives in ONE durable key, so concurrent attacks/joins do
 // read-modify-write over async store ops and would clobber each other (lost
 // updates — worse over Upstash's network). Serialize every tournament mutation
@@ -968,7 +1029,29 @@ wss.on('connection', (ws) => {
           // resolve any expiry FIRST (bot-aware: simulates bot scores before
           // settling deadlines) so a post-deadline attack is refused cleanly
           const pre = tournament.tickBots(t, now);
-          const r = tournament.attack(t, String(msg.feudId || ''), ws.uid, msg.oppName, !!msg.win, msg.lanes | 0, now, c ? c.id : null);
+          const feudId = String(msg.feudId || '');
+          // stash the attacker's battle replay (optional, size-capped) BEFORE the
+          // attack, so its log entry only references a replayId that was ACTUALLY
+          // stored. Best-effort: a store failure must NEVER abort the attack (its
+          // mutation is only persisted by tournament.save below) — worst case we
+          // lose the replay, not the war point. On the rare case the attack then
+          // errors, the ring entry is an orphan (capped + TTL'd, self-heals).
+          let replayId = null;
+          const replay = msg.replay ? sanitizeReplay(msg.replay) : null;
+          if (replay) {
+            const rid = `${ws.uid}-${now}`;
+            try {
+              const key = replayKey(t.week, feudId);
+              const ring = (await store.get(key)) || [];
+              ring.push({ id: rid, data: replay });
+              while (ring.length > REPLAYS_PER_FEUD) ring.shift();
+              await store.set(key, ring, REPLAY_TTL_S);
+              replayId = rid;
+            } catch {
+              replayId = null; // couldn't store — attack still lands, just no replay
+            }
+          }
+          const r = tournament.attack(t, feudId, ws.uid, msg.oppName, !!msg.win, msg.lanes | 0, now, c ? c.id : null, replayId);
           if (r.error) {
             if (pre.activated.length || pre.changed) {
               await tournament.save(t);
@@ -983,6 +1066,17 @@ wss.on('connection', (ws) => {
           await tournament.save(t);
           await pushFeudStart(t, [...pre.activated, ...(r.activated || []), ...post.activated]);
           await pushTournament(t);
+          // live colony feed: tell the attacker's colony-mates what just happened
+          await pushFeudAttack(r.colonyId, {
+            feudId,
+            byUid: ws.uid,
+            byName: r.byName,
+            oppName: String(msg.oppName || '').slice(0, 20),
+            win: !!msg.win,
+            aScore: r.aScore,
+            bScore: r.bScore,
+            replayId,
+          });
         }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
       }
@@ -1008,6 +1102,29 @@ wss.on('connection', (ws) => {
           await tournament.save(t);
           send(ws, 'tour-reward', { coins: r.reward.coins, xp: r.reward.xp, place: r.reward.place });
           send(ws, 'tour-info', { tournament: t, maxAttacks: tournament.MAX_ATTACKS });
+        }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
+        break;
+      }
+
+      case 'feud-replay': {
+        // fetch a colony-mate's recorded feud battle. SAME-COLONY only: the log
+        // entry that owns the replayId must belong to the requester's colony —
+        // enemies (and strangers) can never pull your replays.
+        withTourLock(async () => {
+          if (!ws.uid) return send(ws, 'tour-error', { reason: 'no-uid' });
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return send(ws, 'tour-error', { reason: 'not-in' });
+          const t = await tournament.current();
+          const feudId = String(msg.feudId || '');
+          const replayId = String(msg.replayId || '');
+          const f = t.feuds && t.feuds[feudId];
+          if (!f) return send(ws, 'tour-error', { reason: 'no-replay' });
+          const entry = (f.log || []).find((l) => l.replayId === replayId);
+          if (!entry || entry.colonyId !== c.id) return send(ws, 'tour-error', { reason: 'no-replay' });
+          const ring = (await store.get(replayKey(t.week, feudId))) || [];
+          const hit = ring.find((x) => x && x.id === replayId);
+          if (!hit) return send(ws, 'tour-error', { reason: 'no-replay' });
+          send(ws, 'feud-replay', { feudId, replayId, data: hit.data });
         }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
       }
