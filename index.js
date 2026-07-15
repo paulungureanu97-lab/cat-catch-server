@@ -521,7 +521,11 @@ wss.on('connection', (ws) => {
           colonies
             .myColony(uid)
             .then(async (c) => {
-              if (c && colonies.ensureMissions(c)) await colonies.save(c);
+              if (c) {
+                const changed = colonies.ensureMissions(c);
+                const changed2 = colonies.ensurePerks(c);
+                if (changed || changed2) await colonies.save(c);
+              }
               send(ws, 'colony-mine', { colony: c || null });
             })
             .catch(() => {});
@@ -901,6 +905,36 @@ wss.on('connection', (ws) => {
           if (r.error) return send(ws, 'colony-error', { reason: r.error });
           await colonies.save(c);
           send(ws, 'colony-reward', { coins: r.reward.coins, xp: r.reward.xp });
+          pushColony(c);
+        })().catch(() => {});
+        break;
+      }
+
+      case 'colony-contribute': {
+        // a member donates coins into the shared research bank (the client
+        // deducts the coins optimistically on send; the ack just confirms)
+        (async () => {
+          if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+          const r = colonies.contribute(c, ws.uid, msg.amount | 0);
+          if (r.error) return send(ws, 'colony-error', { reason: r.error });
+          await colonies.save(c);
+          send(ws, 'colony-contributed', { amount: r.amount }); // client deducts on ack
+          pushColony(c);
+        })().catch(() => {});
+        break;
+      }
+
+      case 'colony-research': {
+        // a leader/elder spends the bank to level up a colony perk
+        (async () => {
+          if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+          const r = colonies.research(c, ws.uid, String(msg.perk || ''));
+          if (r.error) return send(ws, 'colony-error', { reason: r.error });
+          await colonies.save(c);
           pushColony(c);
         })().catch(() => {});
         break;
