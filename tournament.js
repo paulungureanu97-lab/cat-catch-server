@@ -43,6 +43,17 @@ async function current() {
   let t = await store.get(CUR);
   if (!t || t.week !== wk) {
     if (t && t.state === 'done') await store.set(LAST, t);
+    // battle replays only live for the week they were played — drop the
+    // archived week's per-feud replay keys so durable storage can't accumulate
+    if (t && t.feuds) {
+      for (const fid of Object.keys(t.feuds)) {
+        try {
+          await store.del(`replays:${t.week}:${fid}`);
+        } catch {
+          /* best-effort cleanup */
+        }
+      }
+    }
     t = freshTournament(wk);
     await store.set(CUR, t);
   }
@@ -283,7 +294,7 @@ function sideColony(t, feud, uid) {
  * CURRENT colony — when provided it must match their roster side, so someone
  * who left (or defected to the enemy colony) can no longer score for the old
  * roster snapshot. */
-function attack(t, feudId, uid, oppName, win, lanes, now, attackerColonyId) {
+function attack(t, feudId, uid, oppName, win, lanes, now, attackerColonyId, replayId) {
   const f = t.feuds[feudId];
   if (!f) return { error: 'no-feud' };
   if (f.state !== 'active') return { error: 'not-active' };
@@ -295,7 +306,9 @@ function attack(t, feudId, uid, oppName, win, lanes, now, attackerColonyId) {
   f.attacks[uid] = (f.attacks[uid] || 0) + 1;
   const w = !!win;
   const byName = (t.rosters[cid] || []).find((m) => m.uid === uid)?.name || '';
-  f.log.push({ colonyId: cid, byUid: uid, byName, oppName: String(oppName || '').slice(0, 20), win: w, lanes: lanes | 0, at: now });
+  const entry = { colonyId: cid, byUid: uid, byName, oppName: String(oppName || '').slice(0, 20), win: w, lanes: lanes | 0, at: now };
+  if (replayId) entry.replayId = String(replayId);
+  f.log.push(entry);
   if (f.log.length > 200) f.log.shift();
   if (w) {
     if (cid === f.aId) f.aScore += 1;
@@ -311,7 +324,17 @@ function attack(t, feudId, uid, oppName, win, lanes, now, attackerColonyId) {
   const done = f.state === 'done';
   let activated = [];
   if (done) activated = tick(t, now).activated; // next-round feuds this resolution unlocked
-  return { ok: true, attacksLeft: MAX_ATTACKS - f.attacks[uid], resolved: done, activated };
+  return {
+    ok: true,
+    attacksLeft: MAX_ATTACKS - f.attacks[uid],
+    resolved: done,
+    activated,
+    // for the live colony feed pushed by index.js
+    colonyId: cid,
+    byName,
+    aScore: f.aScore,
+    bScore: f.bScore,
+  };
 }
 
 function claim(t, colonyId, uid) {
