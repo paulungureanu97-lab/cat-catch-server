@@ -657,6 +657,26 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'ghost': {
+        // a bot ("ghost") PvP opponent: hand back a random REAL leaderboard deck
+        // so a lone player always has someone to fight; fall back to a generated
+        // bot deck when the board is empty. Rewards are capped client-side.
+        lbCheck();
+        const pool = [...lbScores.values()].filter(
+          (e) => e && e.uid !== ws.uid && Array.isArray(e.deck) && e.deck.length,
+        );
+        let ghost;
+        if (pool.length) {
+          const p = pool[Math.floor(Math.random() * pool.length)];
+          ghost = { name: p.name || 'Bot', trophies: p.trophies | 0, deck: p.deck.map((c) => ({ ...c, photo: undefined })) };
+        } else {
+          const b = bots.makeBotColony(weekKey(), Math.floor(Math.random() * 1000), { level: 9, trophies: 100 });
+          ghost = { name: b.entrant.name, trophies: b.entrant.trophies, deck: b.roster[0].deck };
+        }
+        send(ws, 'ghost', ghost);
+        break;
+      }
+
       case 'leaderboard': {
         lbCheck();
         // slim rows only — decks are fetched per-player via `player-info`
