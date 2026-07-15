@@ -166,6 +166,22 @@ function clearRequest(c, uid) {
   return false;
 }
 
+/** Permanent prestige accumulators (all-time; survive week rollovers, never reset).
+ * `glory` = points earned from tournament placement; `titles` = tournaments won. */
+function ensureGlory(c) {
+  if (!c) return false;
+  let changed = false;
+  if (typeof c.glory !== 'number') {
+    c.glory = 0;
+    changed = true;
+  }
+  if (typeof c.titles !== 'number') {
+    c.titles = 0;
+    changed = true;
+  }
+  return changed;
+}
+
 function summary(c) {
   return { id: c.id, name: c.name, emoji: c.emoji, bio: c.bio, members: c.members.length, max: c.max };
 }
@@ -204,6 +220,7 @@ async function create(uid, playerName, playerAvatar, { name, emoji, bio, max }) 
   };
   ensureMissions(colony); // seed this week's missions on creation
   ensurePerks(colony); // seed the empty research bank/perks
+  ensureGlory(colony); // seed permanent glory/titles at 0
   return { colony, id };
 }
 
@@ -260,6 +277,7 @@ module.exports = {
   ensureRequests,
   postRequest,
   clearRequest,
+  ensureGlory,
   clean,
   clampMax,
   async list(limit = 50) {
@@ -271,6 +289,29 @@ module.exports = {
     }
     out.sort((a, b) => b.members - a.members);
     return out;
+  },
+  /** All-time colony ranking by titles then glory. Reads every colony (fine at
+   * a friends scale); returns slim rows for the client board. */
+  async leaderboard(limit = 20) {
+    const ids = await store.smembers(COLS);
+    const cols = [];
+    for (const id of ids) {
+      const c = await get(id);
+      if (!c) continue;
+      ensureGlory(c);
+      cols.push(c);
+    }
+    cols.sort(
+      (a, b) => b.titles - a.titles || b.glory - a.glory || b.members.length - a.members.length,
+    );
+    return cols.slice(0, limit).map((c) => ({
+      id: c.id,
+      name: c.name,
+      emoji: c.emoji,
+      glory: c.glory,
+      titles: c.titles,
+      members: c.members.length,
+    }));
   },
   // persistence helpers (index.js orchestrates delivery to sockets)
   async save(c) {
