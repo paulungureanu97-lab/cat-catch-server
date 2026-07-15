@@ -341,6 +341,20 @@ function withTourLock(fn) {
   return run;
 }
 
+// Per-colony promise-chain mutex — serializes read-modify-write on ONE colony so
+// a concurrent boss-claim can't double-credit (store.get returns fresh copies, so
+// two unlocked handlers would each see claimedBy empty). Keyed by colony id.
+const colonyLocks = new Map();
+function withColonyLock(id, fn) {
+  const prev = colonyLocks.get(id) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  colonyLocks.set(
+    id,
+    run.catch(() => {}),
+  );
+  return run;
+}
+
 /** Apply a finished tournament's permanent glory to the durable colony records
  * exactly once. finishTournament stamps t.gloryAwards; we credit each colony and
  * flip t.gloryApplied. Idempotent (the flag guards re-runs) and must run inside
@@ -627,7 +641,8 @@ wss.on('connection', (ws) => {
                 const changed2 = colonies.ensurePerks(c);
                 const changed3 = colonies.ensureRequests(c);
                 const changed4 = colonies.ensureGlory(c);
-                if (changed || changed2 || changed3 || changed4) await colonies.save(c);
+                const changed5 = colonies.ensureBoss(c);
+                if (changed || changed2 || changed3 || changed4 || changed5) await colonies.save(c);
               }
               send(ws, 'colony-mine', { colony: c || null });
             })
@@ -1033,6 +1048,44 @@ wss.on('connection', (ws) => {
           await colonies.save(c);
           send(ws, 'colony-reward', { coins: r.reward.coins, xp: r.reward.xp });
           pushColony(c);
+        })().catch(() => {});
+        break;
+      }
+
+      // Phase 6: colony raid boss — a member reports a battle vs the shared boss.
+      // Both run under withColonyLock so concurrent attacks don't lose damage and
+      // (critically) a double-tapped claim can't double-credit the reward.
+      case 'boss-attack': {
+        (async () => {
+          if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'not-in' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+            const r = colonies.attackBoss(c, ws.uid, !!msg.win, msg.lanes | 0);
+            if (r.error) return send(ws, 'colony-error', { reason: r.error });
+            await colonies.save(c);
+            send(ws, 'boss-hit', { dmg: r.dmg, hp: r.hp, maxHp: r.maxHp, defeated: r.defeated });
+            pushColony(c); // live HP drop for every online member
+          });
+        })().catch(() => {});
+        break;
+      }
+      case 'boss-claim': {
+        (async () => {
+          if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'not-in' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+            const r = colonies.claimBossReward(c, ws.uid);
+            if (r.error) return send(ws, 'colony-error', { reason: r.error });
+            await colonies.save(c);
+            send(ws, 'colony-reward', { coins: r.coins, xp: r.xp }); // reuse the reward banner
+            pushColony(c);
+          });
         })().catch(() => {});
         break;
       }
