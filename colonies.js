@@ -166,6 +166,57 @@ function clearRequest(c, uid) {
   return false;
 }
 
+// ---- Phase 6: weekly colony RAID BOSS (co-op PvE) ---------------------------
+// A shared-HP boss the whole colony chips at with their decks. Damage pools;
+// when HP hits 0 the boss is defeated and members who contributed can each claim
+// a reward (base + a share-scaled bonus). Resets weekly like missions.
+const BOSS_HP_BASE = 4000;
+const BOSS_HP_PER_MEMBER = 5000;
+const BOSS_ATTACK_CAP = 700; // max damage credited per single attack (anti-cheat)
+const BOSS_REWARD_COINS = 250; // base coins per contributing member on defeat
+const BOSS_REWARD_XP = 150;
+const BOSS_TOP_BONUS = 500; // extra coins pooled by contribution share
+const BOSS_FLOOR = 8; // buildTowerDeck difficulty the client fights (mirrored client-side)
+
+const bossMaxHp = (members) => BOSS_HP_BASE + BOSS_HP_PER_MEMBER * Math.max(1, members);
+/** damage a single reported battle deals (server-computed from win/lanes, capped) */
+const bossDamage = (win, lanes) => (win ? Math.min(BOSS_ATTACK_CAP, 300 + Math.max(0, Math.min(3, lanes | 0)) * 130) : 60);
+
+/** Ensure this week's boss exists (HP locked at week start). Returns true if reset. */
+function ensureBoss(c) {
+  if (!c) return false;
+  const wk = weekId();
+  if (c.boss && c.boss.week === wk) return false;
+  const hp = bossMaxHp(c.members.length);
+  c.boss = { week: wk, maxHp: hp, hp, contrib: {}, defeated: false, claimedBy: [] };
+  return true;
+}
+/** A member reports a battle vs the boss; server credits capped damage. */
+function attackBoss(c, uid, win, lanes) {
+  ensureBoss(c);
+  if (!c.members.some((m) => m.uid === uid)) return { error: 'not-member' };
+  const b = c.boss;
+  if (b.defeated) return { error: 'defeated' };
+  const dmg = bossDamage(win, lanes);
+  b.hp = Math.max(0, b.hp - dmg);
+  b.contrib[uid] = (b.contrib[uid] || 0) + dmg;
+  if (b.hp <= 0) b.defeated = true;
+  return { ok: true, dmg, hp: b.hp, maxHp: b.maxHp, defeated: b.defeated };
+}
+/** Claim the on-defeat reward once (only if you contributed damage). */
+function claimBossReward(c, uid) {
+  ensureBoss(c);
+  const b = c.boss;
+  if (!b.defeated) return { error: 'alive' };
+  if (!c.members.some((m) => m.uid === uid)) return { error: 'not-member' };
+  if ((b.contrib[uid] || 0) <= 0) return { error: 'no-contrib' };
+  if (b.claimedBy.includes(uid)) return { error: 'claimed' };
+  const share = b.maxHp > 0 ? (b.contrib[uid] || 0) / b.maxHp : 0;
+  const coins = BOSS_REWARD_COINS + Math.round(BOSS_TOP_BONUS * Math.min(1, share));
+  b.claimedBy.push(uid);
+  return { ok: true, coins, xp: BOSS_REWARD_XP };
+}
+
 /** Permanent prestige accumulators (all-time; survive week rollovers, never reset).
  * `glory` = points earned from tournament placement; `titles` = tournaments won. */
 function ensureGlory(c) {
@@ -221,6 +272,7 @@ async function create(uid, playerName, playerAvatar, { name, emoji, bio, max }) 
   ensureMissions(colony); // seed this week's missions on creation
   ensurePerks(colony); // seed the empty research bank/perks
   ensureGlory(colony); // seed permanent glory/titles at 0
+  ensureBoss(colony); // seed this week's raid boss
   return { colony, id };
 }
 
@@ -278,6 +330,10 @@ module.exports = {
   postRequest,
   clearRequest,
   ensureGlory,
+  ensureBoss,
+  attackBoss,
+  claimBossReward,
+  BOSS_FLOOR,
   clean,
   clampMax,
   async list(limit = 50) {
