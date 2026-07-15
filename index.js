@@ -129,6 +129,53 @@ function pushColony(colony) {
   }
 }
 
+// ---- card donations: durable per-uid mailbox (delivered on connect) ----
+const MAIL_MAX = 20;
+const mailKey = (uid) => `mail:${uid}`;
+
+// whitelist-copy a donated cat (untrusted, from a client). Photos are STRIPPED
+// to keep the durable blob small — the recipient regenerates the card art by id.
+function sanitizeDonatedCat(c) {
+  if (!c || typeof c !== 'object') return null;
+  const str = (v, n) => String(v == null ? '' : v).slice(0, n);
+  const out = {
+    id: str(c.id, 40).replace(/[^a-zA-Z0-9_-]/g, ''),
+    name: str(c.name, 24),
+    rarity: str(c.rarity, 10),
+    cost: Math.max(0, Math.min(12, c.cost | 0)),
+    power: Math.max(0, Math.min(99, c.power | 0)),
+    tribe: str(c.tribe, 12),
+    ability: str(c.ability, 120),
+    keywords: Array.isArray(c.keywords) ? c.keywords.slice(0, 6).map((k) => str(k, 16)) : [],
+    level: Math.max(1, Math.min(20, c.level | 0 || 1)),
+    evolved: Math.max(0, Math.min(9, c.evolved | 0)),
+    perfectCatch: !!c.perfectCatch,
+    cutout: !!c.cutout,
+  };
+  return out.name && out.rarity ? out : null;
+}
+
+// mailbox reads/writes are read-modify-write over async durable ops, so two
+// donations (or a donation racing delivery) would clobber each other — serialize
+// them all through one promise chain (like withTourLock).
+let mailChain = Promise.resolve();
+function withMailLock(fn) {
+  const run = mailChain.then(fn, fn);
+  mailChain = run.catch(() => {});
+  return run;
+}
+
+/** (Re)deliver a player's buffered card gifts on connect. Does NOT clear them —
+ * each gift is removed only when the recipient ACKs it (gift-ack), so a dropped
+ * frame / ghost socket just means it's redelivered next time (never lost). */
+async function deliverMail(ws) {
+  if (!ws.uid) return;
+  await withMailLock(async () => {
+    const box = (await store.get(mailKey(ws.uid))) || [];
+    for (const item of box) send(ws, 'colony-gift-card', item);
+  });
+}
+
 // ---- Chat: colony broadcast + friend DMs, with a small durable ring buffer ----
 // Lazy in-memory cache (loaded from store on first access), capped per thread and
 // mirrored to store.js so offline members/friends catch up on reconnect.
@@ -515,6 +562,8 @@ wss.on('connection', (ws) => {
         // deliver any moderation blocks the admin issued for this player while
         // they were away (their device persists them from here on)
         if (uid && blocks.has(uid)) send(ws, 'blocked', { cats: blockedList(uid) });
+        // deliver any card gifts donated to this player while they were offline
+        deliverMail(ws).catch(() => {});
         // tell the client which colony it belongs to (if any); roll its weekly
         // missions over if a new week started while it was dormant
         if (uid) {
@@ -524,7 +573,8 @@ wss.on('connection', (ws) => {
               if (c) {
                 const changed = colonies.ensureMissions(c);
                 const changed2 = colonies.ensurePerks(c);
-                if (changed || changed2) await colonies.save(c);
+                const changed3 = colonies.ensureRequests(c);
+                if (changed || changed2 || changed3) await colonies.save(c);
               }
               send(ws, 'colony-mine', { colony: c || null });
             })
@@ -937,6 +987,84 @@ wss.on('connection', (ws) => {
           await colonies.save(c);
           pushColony(c);
         })().catch(() => {});
+        break;
+      }
+
+      case 'colony-request': {
+        // a member posts an open "I need a card" request (optional tribe wish)
+        (async () => {
+          if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+          const r = colonies.postRequest(c, ws.uid, ws.name || '', String(msg.tribe || ''), Date.now());
+          if (r.error) return send(ws, 'colony-error', { reason: r.error });
+          await colonies.save(c);
+          pushColony(c);
+        })().catch(() => {});
+        break;
+      }
+
+      case 'gift-ack': {
+        // recipient persisted a donated card — drop it from their mailbox so it
+        // isn't redelivered (a lost ack just means a rare, benign re-add)
+        if (ws.uid) {
+          const id = String(msg.id || '');
+          if (id) {
+            withMailLock(async () => {
+              const key = mailKey(ws.uid);
+              const box = (await store.get(key)) || [];
+              const next = box.filter((x) => x && x.id !== id);
+              if (next.length !== box.length) {
+                if (next.length) await store.set(key, next);
+                else await store.del(key);
+              }
+            }).catch(() => {});
+          }
+        }
+        break;
+      }
+
+      case 'colony-cancel-request': {
+        (async () => {
+          if (!ws.uid) return;
+          const c = await colonies.myColony(ws.uid);
+          if (c && colonies.clearRequest(c, ws.uid)) {
+            await colonies.save(c);
+            pushColony(c);
+          }
+        })().catch(() => {});
+        break;
+      }
+
+      case 'colony-donate': {
+        // give one of your cats to a colony-mate who requested one (async mailbox)
+        (async () => {
+          if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+          const toUid = String(msg.toUid || '');
+          if (toUid === ws.uid) return send(ws, 'colony-error', { reason: 'self' });
+          if (!c.members.some((m) => m.uid === toUid)) return send(ws, 'colony-error', { reason: 'not-member' });
+          const cat = sanitizeDonatedCat(msg.cat);
+          if (!cat) return send(ws, 'colony-error', { reason: 'bad-card' });
+          const gift = { id: `${ws.uid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, cat, from: ws.name || '' };
+          // ALWAYS buffer first (under the lock), then best-effort immediate send.
+          // The gift lives in the mailbox until the recipient ACKs it, so a ghost
+          // socket / concurrent donation can never lose the donor's given-away cat.
+          await withMailLock(async () => {
+            const key = mailKey(toUid);
+            const box = (await store.get(key)) || [];
+            box.push(gift);
+            while (box.length > MAIL_MAX) box.shift();
+            await store.set(key, box);
+          });
+          const target = socketByUid(toUid);
+          if (target) send(target, 'colony-gift-card', gift); // deliver now if online
+          colonies.clearRequest(c, toUid); // request fulfilled
+          await colonies.save(c);
+          send(ws, 'colony-donate-ok', { toUid });
+          pushColony(c);
+        })().catch(() => send(ws, 'colony-error', { reason: 'error' }));
         break;
       }
 
