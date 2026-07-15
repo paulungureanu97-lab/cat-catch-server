@@ -397,11 +397,30 @@ async function pushFeudStart(t, feudIds) {
 const weekKey = () => 'w' + Math.floor((Date.now() / 86400000 - 4) / 7);
 let lbWeek = weekKey();
 const lbScores = new Map(); // keyOf(name) -> { name, uid, trophies, cats, deck, at }
+
+// Phase 3b: cache each player's village snapshot (in-memory, repopulated on
+// push — a friend can then VIEW it read-only). Slim: no photos, just plots+decor.
+const villages = new Map(); // keyOf(name) -> { name, slots, decor, at }
+const VALID_DECOR = new Set(['flowers', 'tree2', 'lantern', 'banner', 'fountain', 'torch', 'statue', 'rainbow', 'crown']);
+const VALID_BUILDING = new Set(['den', 'tree', 'milk', 'fish', 'train', 'tower']);
+function sanitizeVillage(msg) {
+  const slots = Array.isArray(msg.slots)
+    ? msg.slots
+        .filter((s) => s && VALID_BUILDING.has(s.b) && typeof s.id === 'string')
+        .slice(0, 6)
+        .map((s) => ({ id: String(s.id).slice(0, 8), b: s.b, lv: Math.min(10, Math.max(1, s.lv | 0)) }))
+    : [];
+  const decor = Array.isArray(msg.decor)
+    ? [...new Set(msg.decor.filter((d) => VALID_DECOR.has(d)))].slice(0, 9)
+    : [];
+  return { slots, decor };
+}
 function lbCheck() {
   const wk = weekKey();
   if (wk !== lbWeek) {
     lbWeek = wk;
     lbScores.clear();
+    villages.clear(); // same lifecycle: in-memory, repopulated on each hello-ok push
     persistLb(); // start the new week durably (an empty board for the new key)
   }
 }
@@ -742,6 +761,21 @@ wss.on('connection', (ws) => {
           });
           persistLb(); // mirror the ranking durably so it survives a spin-down
         }
+        break;
+      }
+
+      // Phase 3b: cache my village snapshot so friends can visit it read-only
+      case 'village': {
+        lbCheck(); // fire the weekly reset (which also clears the villages cache)
+        if (ws.name) {
+          villages.set(keyOf(ws.name), { name: ws.name, ...sanitizeVillage(msg), at: Date.now() });
+        }
+        break;
+      }
+      case 'village-view': {
+        const v = villages.get(keyOf(msg.name));
+        if (v) send(ws, 'village-data', { name: v.name, slots: v.slots, decor: v.decor });
+        else send(ws, 'village-data', { name: String(msg.name || '').slice(0, 20), empty: true });
         break;
       }
 
