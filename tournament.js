@@ -21,6 +21,11 @@ const DAY = 86400000; // a feud lasts at most 24h
 const weekId = () => 'w' + Math.floor((Date.now() / 86400000 - 4) / 7);
 
 const REWARDS = { 1: { coins: 300, xp: 200 }, 2: { coins: 150, xp: 100 } };
+// Permanent prestige for the all-time colony leaderboard (applied by index.js to
+// the durable colony records once a tournament is done). Champion also +1 title.
+const GLORY_CHAMP = 100;
+const GLORY_FINALIST = 50;
+const GLORY_PART = 15; // participation for every real entrant
 
 function freshTournament(week) {
   return {
@@ -279,6 +284,19 @@ function finishTournament(t, finalFeud) {
   }
   if (first) t.rewards[first] = { ...REWARDS[1], place: 1 };
   if (second) t.rewards[second] = { ...REWARDS[2], place: 2 };
+
+  // Permanent glory awards (aligned with the visible podium so the colony shown
+  // as place 1 also earns the championship title). Applied ONCE by index.js —
+  // it reads t.gloryAwards and flips t.gloryApplied. Every real entrant earns a
+  // little participation glory; the podium earns more. Bots (no colony record)
+  // are excluded.
+  const awards = {};
+  for (const cid of Object.keys(t.rosters || {})) {
+    if (!isBot(cid)) awards[cid] = { glory: GLORY_PART, titles: 0 };
+  }
+  if (second && !isBot(second)) awards[second] = { glory: GLORY_FINALIST, titles: 0 };
+  if (first && !isBot(first)) awards[first] = { glory: GLORY_CHAMP, titles: 1 };
+  t.gloryAwards = awards;
 }
 
 /** Which colony (a or b) a uid belongs to in a feud, or null. */
