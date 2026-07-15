@@ -81,6 +81,58 @@ function claimMission(c, uid, mid) {
   return { reward: { coins: m.coins, xp: m.xp } };
 }
 
+// ---- Phase 4: colony research (shared bank -> economy perks) ----
+// Members donate their coins into the colony BANK; a leader/elder spends the bank
+// to level up economy PERKS that benefit every member (applied CLIENT-side to
+// battle/tower/ghost rewards). Coins are client-side (not server-authoritative)
+// so the bank is self-reported — bounded per contribution; the perks are shared
+// so there's no incentive to cheat (same trust model as the leaderboard).
+const PERK_IDS = ['coins', 'xp', 'drop'];
+const PERK_MAX = 5;
+const perkCost = (level) => 500 * (level + 1); // 500,1000,1500,2000,2500 -> 7500 to max one
+const MAX_CONTRIB = 100000; // per contribution message
+
+function ensurePerks(c) {
+  if (!c) return false;
+  let changed = false;
+  if (typeof c.bank !== 'number') {
+    c.bank = 0;
+    changed = true;
+  }
+  if (!c.perks || typeof c.perks !== 'object') {
+    c.perks = { coins: 0, xp: 0, drop: 0 };
+    changed = true;
+  } else {
+    for (const p of PERK_IDS)
+      if (typeof c.perks[p] !== 'number') {
+        c.perks[p] = 0;
+        changed = true;
+      }
+  }
+  return changed;
+}
+/** A member donates coins into the shared bank (client already checked it can pay). */
+function contribute(c, uid, amount) {
+  ensurePerks(c);
+  if (!c.members.some((m) => m.uid === uid)) return { error: 'not-member' };
+  const amt = Math.max(1, Math.min(MAX_CONTRIB, amount | 0));
+  c.bank += amt;
+  return { ok: true, amount: amt, bank: c.bank };
+}
+/** A leader/elder spends the bank to level up a perk. */
+function research(c, uid, perkId) {
+  ensurePerks(c);
+  if (!PERK_IDS.includes(perkId)) return { error: 'bad-perk' };
+  if (!['leader', 'elder'].includes(roleOf(c, uid))) return { error: 'auth' };
+  const level = c.perks[perkId] | 0;
+  if (level >= PERK_MAX) return { error: 'maxed' };
+  const cost = perkCost(level);
+  if (c.bank < cost) return { error: 'poor' };
+  c.bank -= cost;
+  c.perks[perkId] = level + 1;
+  return { ok: true, perk: perkId, level: c.perks[perkId], bank: c.bank };
+}
+
 function summary(c) {
   return { id: c.id, name: c.name, emoji: c.emoji, bio: c.bio, members: c.members.length, max: c.max };
 }
@@ -118,6 +170,7 @@ async function create(uid, playerName, playerAvatar, { name, emoji, bio, max }) 
     members: [{ uid, name: clean(playerName, 20), avatar: clean(playerAvatar, 8), role: 'leader', at: Date.now() }],
   };
   ensureMissions(colony); // seed this week's missions on creation
+  ensurePerks(colony); // seed the empty research bank/perks
   return { colony, id };
 }
 
@@ -165,6 +218,12 @@ module.exports = {
   ensureMissions,
   addProgress,
   claimMission,
+  ensurePerks,
+  contribute,
+  research,
+  PERK_IDS,
+  PERK_MAX,
+  perkCost,
   clean,
   clampMax,
   async list(limit = 50) {
