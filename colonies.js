@@ -133,6 +133,39 @@ function research(c, uid, perkId) {
   return { ok: true, perk: perkId, level: c.perks[perkId], bank: c.bank };
 }
 
+// ---- Phase 4b: card requests / donations ----
+// A member posts ONE open request ("I need a card", optional tribe wish); a
+// colony-mate fulfils it by DONATING one of their spare cats (given away, not
+// copied). Delivery is async via a durable per-uid mailbox (index.js) so the
+// recipient gets it even if offline. Requests live on the colony object.
+const REQUEST_COOLDOWN = 20 * 60000; // 20 min between a member's requests
+
+function ensureRequests(c) {
+  if (!c) return false;
+  if (!c.requests || typeof c.requests !== 'object') {
+    c.requests = {};
+    return true;
+  }
+  return false;
+}
+/** Post/refresh a member's open request. Rate-limited per member. */
+function postRequest(c, uid, name, tribe, now) {
+  ensureRequests(c);
+  if (!c.members.some((m) => m.uid === uid)) return { error: 'not-member' };
+  const cur = c.requests[uid];
+  if (cur && now - (cur.at || 0) < REQUEST_COOLDOWN) return { error: 'cooldown' };
+  c.requests[uid] = { name: clean(name, 20), tribe: clean(tribe, 12), at: now };
+  return { ok: true };
+}
+function clearRequest(c, uid) {
+  ensureRequests(c);
+  if (c.requests[uid]) {
+    delete c.requests[uid];
+    return true;
+  }
+  return false;
+}
+
 function summary(c) {
   return { id: c.id, name: c.name, emoji: c.emoji, bio: c.bio, members: c.members.length, max: c.max };
 }
@@ -224,6 +257,9 @@ module.exports = {
   PERK_IDS,
   PERK_MAX,
   perkCost,
+  ensureRequests,
+  postRequest,
+  clearRequest,
   clean,
   clampMax,
   async list(limit = 50) {
