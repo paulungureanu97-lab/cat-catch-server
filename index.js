@@ -341,6 +341,39 @@ function withTourLock(fn) {
   return run;
 }
 
+/** Apply a finished tournament's permanent glory to the durable colony records
+ * exactly once. finishTournament stamps t.gloryAwards; we credit each colony and
+ * flip t.gloryApplied. Idempotent (the flag guards re-runs) and must run inside
+ * withTourLock. Returns true when it mutated t (caller persists via tournament.save).
+ * Self-heals: called on every tour read, so glory lands even if no one was online
+ * at the exact moment the final resolved. */
+async function applyGlory(t) {
+  if (!t || t.state !== 'done' || !t.gloryAwards || t.gloryApplied) return false;
+  // Per-colony dedupe key stored IN THE SAME durable record as the credit
+  // (col:<id>), so a re-run is idempotent even if the t.gloryApplied marker
+  // (which lives in the separate tour:cur key) never persists — e.g. the
+  // caller's tournament.save(t) fails, or the process restarts between the
+  // colony writes and the marker write. Without this, the never-reset all-time
+  // leaderboard could be double-credited (doubled glory/titles).
+  const wk = t.week || '';
+  for (const [cid, award] of Object.entries(t.gloryAwards)) {
+    try {
+      const c = await colonies.get(cid);
+      if (!c) continue; // colony disbanded or a bot id → skip
+      colonies.ensureGlory(c);
+      if (c.gloryFrom === wk) continue; // already credited for THIS tournament
+      c.glory += award.glory || 0;
+      c.titles += award.titles || 0;
+      c.gloryFrom = wk;
+      await colonies.save(c);
+    } catch {
+      /* one colony failing must not block the rest or re-award later */
+    }
+  }
+  t.gloryApplied = true;
+  return true;
+}
+
 /** notify online members of both colonies in the given feuds that a war started */
 async function pushFeudStart(t, feudIds) {
   if (!t || !Array.isArray(feudIds)) return;
@@ -574,7 +607,8 @@ wss.on('connection', (ws) => {
                 const changed = colonies.ensureMissions(c);
                 const changed2 = colonies.ensurePerks(c);
                 const changed3 = colonies.ensureRequests(c);
-                if (changed || changed2 || changed3) await colonies.save(c);
+                const changed4 = colonies.ensureGlory(c);
+                if (changed || changed2 || changed3 || changed4) await colonies.save(c);
               }
               send(ws, 'colony-mine', { colony: c || null });
             })
@@ -837,6 +871,15 @@ wss.on('connection', (ws) => {
           .list()
           .then((items) => send(ws, 'colony-list', { items }))
           .catch(() => send(ws, 'colony-list', { items: [] }));
+        break;
+      }
+
+      // all-time colony ranking (glory/titles) for the permanent leaderboard
+      case 'colony-leaderboard': {
+        colonies
+          .leaderboard(20)
+          .then((items) => send(ws, 'colony-leaderboard', { items }))
+          .catch(() => send(ws, 'colony-leaderboard', { items: [] }));
         break;
       }
 
@@ -1152,7 +1195,10 @@ wss.on('connection', (ws) => {
           // resolving deadlines (a bare tick() first would settle a bot feud
           // 0-0 by seed) and runs tick() internally, returning its activations.
           const { activated, changed } = tournament.tickBots(t, now);
-          if (activated.length || changed) {
+          // credit permanent glory if this read is the one that observed the
+          // finish (self-heals a finished-but-uncredited tournament too)
+          const gloried = await applyGlory(t);
+          if (activated.length || changed || gloried) {
             await tournament.save(t);
             await pushFeudStart(t, activated);
             await pushTournament(t);
@@ -1245,6 +1291,7 @@ wss.on('connection', (ws) => {
           // advance the bot side too (and fast-forward + resolve if this attack
           // exhausted the human side's attacks)
           const post = tournament.tickBots(t, now);
+          await applyGlory(t); // if this attack resolved the final, credit glory now
           await tournament.save(t);
           await pushFeudStart(t, [...pre.activated, ...(r.activated || []), ...post.activated]);
           await pushTournament(t);
@@ -1276,9 +1323,10 @@ wss.on('connection', (ws) => {
           // may have expired since the last read, and a plain tick would hand a
           // bot feud a 0-0 seed win before the bot ever scored
           const pre = tournament.tickBots(t, nowC);
+          const gloried = await applyGlory(t); // done tournament → credit glory before claim
           const r = tournament.claim(t, c.id, ws.uid);
           if (r.error) {
-            if (pre.activated.length || pre.changed) await tournament.save(t);
+            if (pre.activated.length || pre.changed || gloried) await tournament.save(t);
             return send(ws, 'tour-error', { reason: r.error });
           }
           await tournament.save(t);
