@@ -28,8 +28,9 @@ module.exports = {
     const v = mem.get(key);
     return v == null ? null : JSON.parse(v);
   },
-  async set(key, val) {
-    if (redis) return redis.set(key, val);
+  async set(key, val, ttlSec) {
+    if (redis) return redis.set(key, val, ttlSec ? { ex: ttlSec } : undefined);
+    // in-memory fallback ignores TTL (non-durable; resets on restart)
     mem.set(key, JSON.stringify(val));
   },
   async del(key) {
