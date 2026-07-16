@@ -429,7 +429,12 @@ function tickBots(t, now, rng) {
         // exhausted, or the deadline passed), else pace by elapsed time
         const fastForward = (aBot && bBot) || membersExhausted(t, f, oppId) || now >= f.deadline;
         const frac = Math.max(0, Math.min(1, (now - (f.deadline - DAY)) / DAY));
-        const target = fastForward ? cap : Math.floor(frac * cap);
+        // pace by elapsed time, but with an EARLY FLOOR so the bot lands its
+        // first attack ~1h in instead of doing nothing for hours — a paced
+        // `floor(frac*cap)` leaves cap-2 bots at 0 until the 12h mark, which
+        // reads as "the bots never fight back". (cap >= 2 always, so the +1
+        // floor can't exceed cap.)
+        const target = fastForward ? cap : Math.max(Math.floor(frac * cap), frac >= 0.04 ? 1 : 0);
         let done = roster.reduce((s, m) => s + Math.min(MAX_ATTACKS, f.attacks[m.uid] || 0), 0);
         const oppRoster = t.rosters[oppId] || [];
         const p = botWinProb(t, cid, oppId);
