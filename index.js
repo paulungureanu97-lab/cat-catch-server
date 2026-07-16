@@ -308,6 +308,7 @@ function sanitizeReplay(r) {
     win: !!r.win,
     lanes: r.lanes | 0,
     at: r.at | 0,
+    map: str(r.map, 24), // the mapId the attacker played, so mates rewatch it right
     turns: r.turns.slice(0, 8).map((tn) => ({
       lanes: (Array.isArray(tn && tn.lanes) ? tn.lanes : []).slice(0, 3).map((l) => ({
         me: (Array.isArray(l && l.me) ? l.me : []).slice(0, 8).map(card),
