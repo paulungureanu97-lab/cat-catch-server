@@ -130,11 +130,15 @@ function pushColony(colony) {
 }
 
 // ---- card donations: durable per-uid mailbox (delivered on connect) ----
-const MAIL_MAX = 20;
+const MAIL_MAX = 16;
+// a donated card carries a small 128px thumbnail (client caps it ~48KB). Keep the
+// durable mailbox blob under Upstash's ~1MB/request cap: MAIL_MAX * this < 1MB.
+const MAX_DONATE_PHOTO = 48_000;
 const mailKey = (uid) => `mail:${uid}`;
 
-// whitelist-copy a donated cat (untrusted, from a client). Photos are STRIPPED
-// to keep the durable blob small — the recipient regenerates the card art by id.
+// whitelist-copy a donated cat (untrusted, from a client). We KEEP a small
+// thumbnail photo (the client sends a 128px one, capped ~48KB) so the recipient
+// actually sees the cat — a bigger/absent photo just leaves the card art only.
 function sanitizeDonatedCat(c) {
   if (!c || typeof c !== 'object') return null;
   const str = (v, n) => String(v == null ? '' : v).slice(0, n);
@@ -152,6 +156,10 @@ function sanitizeDonatedCat(c) {
     perfectCatch: !!c.perfectCatch,
     cutout: !!c.cutout,
   };
+  // keep the thumbnail only when it's a sane small string (durable-blob safe)
+  if (typeof c.photo === 'string' && c.photo.length > 0 && c.photo.length <= MAX_DONATE_PHOTO) {
+    out.photo = c.photo;
+  }
   return out.name && out.rarity ? out : null;
 }
 
