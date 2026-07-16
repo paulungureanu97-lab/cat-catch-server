@@ -1433,9 +1433,9 @@ wss.on('connection', (ws) => {
       }
 
       case 'feud-replay': {
-        // fetch a colony-mate's recorded feud battle. SAME-COLONY only: the log
-        // entry that owns the replayId must belong to the requester's colony —
-        // enemies (and strangers) can never pull your replays.
+        // fetch a recorded feud battle. Allowed for BOTH colonies in the feud —
+        // your own colony-mates' attacks AND the enemy's attacks against you (a
+        // shared war log, CoC-style). Strangers not in either side are refused.
         withTourLock(async () => {
           if (!ws.uid) return send(ws, 'tour-error', { reason: 'no-uid' });
           const c = await colonies.myColony(ws.uid);
@@ -1445,8 +1445,9 @@ wss.on('connection', (ws) => {
           const replayId = String(msg.replayId || '');
           const f = t.feuds && t.feuds[feudId];
           if (!f) return send(ws, 'tour-error', { reason: 'no-replay' });
+          const inFeud = f.aId === c.id || f.bId === c.id;
           const entry = (f.log || []).find((l) => l.replayId === replayId);
-          if (!entry || entry.colonyId !== c.id) return send(ws, 'tour-error', { reason: 'no-replay' });
+          if (!entry || !inFeud) return send(ws, 'tour-error', { reason: 'no-replay' });
           const ring = (await store.get(replayKey(t.week, feudId))) || [];
           const hit = ring.find((x) => x && x.id === replayId);
           if (!hit) return send(ws, 'tour-error', { reason: 'no-replay' });
