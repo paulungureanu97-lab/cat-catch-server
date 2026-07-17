@@ -172,23 +172,32 @@ function clearRequest(c, uid) {
 // a reward (base + a share-scaled bonus). Resets weekly like missions.
 const BOSS_HP_BASE = 4000;
 const BOSS_HP_PER_MEMBER = 5000;
+const BOSS_HP_PER_WIN = 3000; // each all-time defeat makes the NEXT boss this much tougher
 const BOSS_ATTACK_CAP = 700; // max damage credited per single attack (anti-cheat)
 const BOSS_REWARD_COINS = 250; // base coins per contributing member on defeat
 const BOSS_REWARD_XP = 150;
 const BOSS_TOP_BONUS = 500; // extra coins pooled by contribution share
+const BOSS_REWARD_PER_WIN = 25; // extra base coins per boss level (tougher boss pays more)
+const BOSS_XP_PER_WIN = 15;
 const BOSS_FLOOR = 8; // buildTowerDeck difficulty the client fights (mirrored client-side)
 
-const bossMaxHp = (members) => BOSS_HP_BASE + BOSS_HP_PER_MEMBER * Math.max(1, members);
+// HP scales with BOTH the colony size AND how many times the colony has already
+// slain the boss (a permanent, all-time progression → each kill raises the bar).
+const bossMaxHp = (members, wins) =>
+  BOSS_HP_BASE + BOSS_HP_PER_MEMBER * Math.max(1, members) + BOSS_HP_PER_WIN * Math.max(0, wins | 0);
 /** damage a single reported battle deals (server-computed from win/lanes, capped) */
 const bossDamage = (win, lanes) => (win ? Math.min(BOSS_ATTACK_CAP, 300 + Math.max(0, Math.min(3, lanes | 0)) * 130) : 60);
 
-/** Ensure this week's boss exists (HP locked at week start). Returns true if reset. */
+/** Ensure this week's boss exists (HP locked at week start). Returns true if reset.
+ * `c.bossWins` = all-time kills, never reset — it drives the HP/level ramp. */
 function ensureBoss(c) {
   if (!c) return false;
+  if (typeof c.bossWins !== 'number') c.bossWins = 0; // migrate older colonies
   const wk = weekId();
   if (c.boss && c.boss.week === wk) return false;
-  const hp = bossMaxHp(c.members.length);
-  c.boss = { week: wk, maxHp: hp, hp, contrib: {}, defeated: false, claimedBy: [] };
+  const hp = bossMaxHp(c.members.length, c.bossWins);
+  // level = kills so far + 1 (this week's boss is the (bossWins+1)th the clan faces)
+  c.boss = { week: wk, maxHp: hp, hp, contrib: {}, defeated: false, claimedBy: [], level: c.bossWins + 1 };
   return true;
 }
 /** A member reports a battle vs the boss; server credits capped damage. */
@@ -200,7 +209,10 @@ function attackBoss(c, uid, win, lanes) {
   const dmg = bossDamage(win, lanes);
   b.hp = Math.max(0, b.hp - dmg);
   b.contrib[uid] = (b.contrib[uid] || 0) + dmg;
-  if (b.hp <= 0) b.defeated = true;
+  if (b.hp <= 0 && !b.defeated) {
+    b.defeated = true;
+    c.bossWins = (c.bossWins | 0) + 1; // permanent kill count → next week's boss is tougher
+  }
   return { ok: true, dmg, hp: b.hp, maxHp: b.maxHp, defeated: b.defeated };
 }
 /** Claim the on-defeat reward once (only if you contributed damage). */
@@ -212,9 +224,13 @@ function claimBossReward(c, uid) {
   if ((b.contrib[uid] || 0) <= 0) return { error: 'no-contrib' };
   if (b.claimedBy.includes(uid)) return { error: 'claimed' };
   const share = b.maxHp > 0 ? (b.contrib[uid] || 0) / b.maxHp : 0;
-  const coins = BOSS_REWARD_COINS + Math.round(BOSS_TOP_BONUS * Math.min(1, share));
+  // tougher (higher-level) bosses pay more. level = kills already banked (this
+  // boss is the level-th; the level-1 wins before it earn the per-win bump).
+  const lvlBonus = Math.max(0, (b.level | 0) - 1);
+  const coins = BOSS_REWARD_COINS + BOSS_REWARD_PER_WIN * lvlBonus + Math.round(BOSS_TOP_BONUS * Math.min(1, share));
+  const xp = BOSS_REWARD_XP + BOSS_XP_PER_WIN * lvlBonus;
   b.claimedBy.push(uid);
-  return { ok: true, coins, xp: BOSS_REWARD_XP };
+  return { ok: true, coins, xp };
 }
 
 /** Permanent prestige accumulators (all-time; survive week rollovers, never reset).
