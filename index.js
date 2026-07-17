@@ -959,73 +959,94 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      // ⚠️ EVERY colony read-modify-write below runs under withColonyLock with a
+      // FRESH copy read INSIDE the lock. store.get returns fresh copies and
+      // colonies.save writes the whole object — an unlocked sibling (e.g. a
+      // colony-progress fired by any member's catch) racing a locked boss write
+      // could otherwise save a stale copy over it, reverting bossWins/defeated
+      // (review 1.65.0: boss revive + lost HP ramp).
       case 'colony-join': {
         (async () => {
           if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
-          const r = await colonies.join(ws.uid, String(msg.id || ''), ws.name, ws.avatar);
-          if (r.error) return send(ws, 'colony-error', { reason: r.error });
-          await colonies.save(r.colony);
-          await colonies.setMember(ws.uid, r.colony.id);
-          pushColony(r.colony);
+          const id = String(msg.id || '');
+          await withColonyLock(id, async () => {
+            const r = await colonies.join(ws.uid, id, ws.name, ws.avatar);
+            if (r.error) return send(ws, 'colony-error', { reason: r.error });
+            await colonies.save(r.colony);
+            await colonies.setMember(ws.uid, r.colony.id);
+            pushColony(r.colony);
+          });
         })().catch(() => send(ws, 'colony-error', { reason: 'error' }));
         break;
       }
 
       case 'colony-leave': {
         (async () => {
-          const c = await colonies.myColony(ws.uid);
+          const cid = await colonies.myColonyId(ws.uid);
           await colonies.clearMember(ws.uid);
           send(ws, 'colony-mine', { colony: null });
-          if (!c) return;
-          const { colony } = colonies.removeMember(c, ws.uid);
-          if (!colony) return colonies.disband(c.id);
-          await colonies.save(colony);
-          pushColony(colony);
+          if (!cid) return;
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c) return;
+            const { colony } = colonies.removeMember(c, ws.uid);
+            if (!colony) return colonies.disband(c.id);
+            await colonies.save(colony);
+            pushColony(colony);
+          });
         })().catch(() => {});
         break;
       }
 
       case 'colony-kick': {
         (async () => {
-          const c = await colonies.myColony(ws.uid);
-          if (!c || !colonies.canManage(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
-          const target = String(msg.uid || '');
-          // the target must STILL be a member — kicking someone who already left
-          // would clearMember() their pointer to whatever NEW colony they joined
-          if (!c.members.some((m) => m.uid === target)) {
-            return send(ws, 'colony-error', { reason: 'bad-target' });
-          }
-          if (target === ws.uid || colonies.roleOf(c, target) === 'leader') {
-            return send(ws, 'colony-error', { reason: 'bad-target' });
-          }
-          const { colony } = colonies.removeMember(c, target);
-          await colonies.clearMember(target);
-          const ts = socketByUid(target);
-          if (ts) {
-            send(ts, 'colony-kicked', { name: c.name });
-            send(ts, 'colony-mine', { colony: null });
-          }
-          if (colony) {
-            await colonies.save(colony);
-            pushColony(colony);
-          } else {
-            await colonies.disband(c.id);
-          }
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'auth' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c || !colonies.canManage(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
+            const target = String(msg.uid || '');
+            // the target must STILL be a member — kicking someone who already left
+            // would clearMember() their pointer to whatever NEW colony they joined
+            if (!c.members.some((m) => m.uid === target)) {
+              return send(ws, 'colony-error', { reason: 'bad-target' });
+            }
+            if (target === ws.uid || colonies.roleOf(c, target) === 'leader') {
+              return send(ws, 'colony-error', { reason: 'bad-target' });
+            }
+            const { colony } = colonies.removeMember(c, target);
+            await colonies.clearMember(target);
+            const ts = socketByUid(target);
+            if (ts) {
+              send(ts, 'colony-kicked', { name: c.name });
+              send(ts, 'colony-mine', { colony: null });
+            }
+            if (colony) {
+              await colonies.save(colony);
+              pushColony(colony);
+            } else {
+              await colonies.disband(c.id);
+            }
+          });
         })().catch(() => {});
         break;
       }
 
       case 'colony-role': {
         (async () => {
-          const c = await colonies.myColony(ws.uid);
-          if (!c || !colonies.isLeader(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
-          const target = String(msg.uid || '');
-          const role = msg.role === 'elder' ? 'elder' : 'member';
-          const m = c.members.find((x) => x.uid === target);
-          if (!m || target === ws.uid || m.role === 'leader') return send(ws, 'colony-error', { reason: 'bad-target' });
-          m.role = role;
-          await colonies.save(c);
-          pushColony(c);
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'auth' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c || !colonies.isLeader(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
+            const target = String(msg.uid || '');
+            const role = msg.role === 'elder' ? 'elder' : 'member';
+            const m = c.members.find((x) => x.uid === target);
+            if (!m || target === ws.uid || m.role === 'leader') return send(ws, 'colony-error', { reason: 'bad-target' });
+            m.role = role;
+            await colonies.save(c);
+            pushColony(c);
+          });
         })().catch(() => {});
         break;
       }
@@ -1034,14 +1055,18 @@ wss.on('connection', (ws) => {
         // a member's catch/win/etc. feeds the colony's collective missions
         (async () => {
           if (!ws.uid) return;
-          const c = await colonies.myColony(ws.uid);
-          if (!c) return;
-          const rolled = colonies.ensureMissions(c);
-          const moved = colonies.addProgress(c, String(msg.pt || '').slice(0, 16), msg.amount | 0 || 1);
-          if (rolled || moved) {
-            await colonies.save(c);
-            pushColony(c);
-          }
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return;
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c) return;
+            const rolled = colonies.ensureMissions(c);
+            const moved = colonies.addProgress(c, String(msg.pt || '').slice(0, 16), msg.amount | 0 || 1);
+            if (rolled || moved) {
+              await colonies.save(c);
+              pushColony(c);
+            }
+          });
         })().catch(() => {});
         break;
       }
@@ -1050,13 +1075,17 @@ wss.on('connection', (ws) => {
         // a member claims a completed mission's reward (once per member)
         (async () => {
           if (!ws.uid) return;
-          const c = await colonies.myColony(ws.uid);
-          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
-          const r = colonies.claimMission(c, ws.uid, String(msg.mid || ''));
-          if (r.error) return send(ws, 'colony-error', { reason: r.error });
-          await colonies.save(c);
-          send(ws, 'colony-reward', { coins: r.reward.coins, xp: r.reward.xp });
-          pushColony(c);
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'not-in' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+            const r = colonies.claimMission(c, ws.uid, String(msg.mid || ''));
+            if (r.error) return send(ws, 'colony-error', { reason: r.error });
+            await colonies.save(c);
+            send(ws, 'colony-reward', { coins: r.reward.coins, xp: r.reward.xp });
+            pushColony(c);
+          });
         })().catch(() => {});
         break;
       }
@@ -1104,13 +1133,17 @@ wss.on('connection', (ws) => {
         // deducts the coins optimistically on send; the ack just confirms)
         (async () => {
           if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
-          const c = await colonies.myColony(ws.uid);
-          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
-          const r = colonies.contribute(c, ws.uid, msg.amount | 0);
-          if (r.error) return send(ws, 'colony-error', { reason: r.error });
-          await colonies.save(c);
-          send(ws, 'colony-contributed', { amount: r.amount }); // client deducts on ack
-          pushColony(c);
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'not-in' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+            const r = colonies.contribute(c, ws.uid, msg.amount | 0);
+            if (r.error) return send(ws, 'colony-error', { reason: r.error });
+            await colonies.save(c);
+            send(ws, 'colony-contributed', { amount: r.amount }); // client deducts on ack
+            pushColony(c);
+          });
         })().catch(() => {});
         break;
       }
@@ -1119,12 +1152,16 @@ wss.on('connection', (ws) => {
         // a leader/elder spends the bank to level up a colony perk
         (async () => {
           if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
-          const c = await colonies.myColony(ws.uid);
-          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
-          const r = colonies.research(c, ws.uid, String(msg.perk || ''));
-          if (r.error) return send(ws, 'colony-error', { reason: r.error });
-          await colonies.save(c);
-          pushColony(c);
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'not-in' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+            const r = colonies.research(c, ws.uid, String(msg.perk || ''));
+            if (r.error) return send(ws, 'colony-error', { reason: r.error });
+            await colonies.save(c);
+            pushColony(c);
+          });
         })().catch(() => {});
         break;
       }
@@ -1133,12 +1170,16 @@ wss.on('connection', (ws) => {
         // a member posts an open "I need a card" request (optional tribe wish)
         (async () => {
           if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
-          const c = await colonies.myColony(ws.uid);
-          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
-          const r = colonies.postRequest(c, ws.uid, ws.name || '', String(msg.tribe || ''), Date.now());
-          if (r.error) return send(ws, 'colony-error', { reason: r.error });
-          await colonies.save(c);
-          pushColony(c);
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'not-in' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+            const r = colonies.postRequest(c, ws.uid, ws.name || '', String(msg.tribe || ''), Date.now());
+            if (r.error) return send(ws, 'colony-error', { reason: r.error });
+            await colonies.save(c);
+            pushColony(c);
+          });
         })().catch(() => {});
         break;
       }
@@ -1166,11 +1207,15 @@ wss.on('connection', (ws) => {
       case 'colony-cancel-request': {
         (async () => {
           if (!ws.uid) return;
-          const c = await colonies.myColony(ws.uid);
-          if (c && colonies.clearRequest(c, ws.uid)) {
-            await colonies.save(c);
-            pushColony(c);
-          }
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return;
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (c && colonies.clearRequest(c, ws.uid)) {
+              await colonies.save(c);
+              pushColony(c);
+            }
+          });
         })().catch(() => {});
         break;
       }
@@ -1179,43 +1224,52 @@ wss.on('connection', (ws) => {
         // give one of your cats to a colony-mate who requested one (async mailbox)
         (async () => {
           if (!ws.uid) return send(ws, 'colony-error', { reason: 'no-uid' });
-          const c = await colonies.myColony(ws.uid);
-          if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
-          const toUid = String(msg.toUid || '');
-          if (toUid === ws.uid) return send(ws, 'colony-error', { reason: 'self' });
-          if (!c.members.some((m) => m.uid === toUid)) return send(ws, 'colony-error', { reason: 'not-member' });
-          const cat = sanitizeDonatedCat(msg.cat);
-          if (!cat) return send(ws, 'colony-error', { reason: 'bad-card' });
-          const gift = { id: `${ws.uid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, cat, from: ws.name || '' };
-          // ALWAYS buffer first (under the lock), then best-effort immediate send.
-          // The gift lives in the mailbox until the recipient ACKs it, so a ghost
-          // socket / concurrent donation can never lose the donor's given-away cat.
-          await withMailLock(async () => {
-            const key = mailKey(toUid);
-            const box = (await store.get(key)) || [];
-            box.push(gift);
-            while (box.length > MAIL_MAX) box.shift();
-            await store.set(key, box);
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'not-in' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c) return send(ws, 'colony-error', { reason: 'not-in' });
+            const toUid = String(msg.toUid || '');
+            if (toUid === ws.uid) return send(ws, 'colony-error', { reason: 'self' });
+            if (!c.members.some((m) => m.uid === toUid)) return send(ws, 'colony-error', { reason: 'not-member' });
+            const cat = sanitizeDonatedCat(msg.cat);
+            if (!cat) return send(ws, 'colony-error', { reason: 'bad-card' });
+            const gift = { id: `${ws.uid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`, cat, from: ws.name || '' };
+            // ALWAYS buffer first (under the mail lock — its chain is independent
+            // of the colony lock, so nesting cannot deadlock), then best-effort
+            // immediate send. The gift lives in the mailbox until the recipient
+            // ACKs it, so a ghost socket can never lose the donor's cat.
+            await withMailLock(async () => {
+              const key = mailKey(toUid);
+              const box = (await store.get(key)) || [];
+              box.push(gift);
+              while (box.length > MAIL_MAX) box.shift();
+              await store.set(key, box);
+            });
+            const target = socketByUid(toUid);
+            if (target) send(target, 'colony-gift-card', gift); // deliver now if online
+            colonies.clearRequest(c, toUid); // request fulfilled
+            await colonies.save(c);
+            send(ws, 'colony-donate-ok', { toUid });
+            pushColony(c);
           });
-          const target = socketByUid(toUid);
-          if (target) send(target, 'colony-gift-card', gift); // deliver now if online
-          colonies.clearRequest(c, toUid); // request fulfilled
-          await colonies.save(c);
-          send(ws, 'colony-donate-ok', { toUid });
-          pushColony(c);
         })().catch(() => send(ws, 'colony-error', { reason: 'error' }));
         break;
       }
 
       case 'colony-edit': {
         (async () => {
-          const c = await colonies.myColony(ws.uid);
-          if (!c || !colonies.isLeader(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
-          if (msg.emoji != null) c.emoji = colonies.clean(msg.emoji, 4) || c.emoji;
-          if (msg.bio != null) c.bio = colonies.clean(msg.bio, 120);
-          if (msg.max != null) c.max = Math.max(c.members.length, colonies.clampMax(msg.max));
-          await colonies.save(c);
-          pushColony(c);
+          const cid = await colonies.myColonyId(ws.uid);
+          if (!cid) return send(ws, 'colony-error', { reason: 'auth' });
+          await withColonyLock(cid, async () => {
+            const c = await colonies.get(cid);
+            if (!c || !colonies.isLeader(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
+            if (msg.emoji != null) c.emoji = colonies.clean(msg.emoji, 4) || c.emoji;
+            if (msg.bio != null) c.bio = colonies.clean(msg.bio, 120);
+            if (msg.max != null) c.max = Math.max(c.members.length, colonies.clampMax(msg.max));
+            await colonies.save(c);
+            pushColony(c);
+          });
         })().catch(() => {});
         break;
       }
