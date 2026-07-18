@@ -1274,6 +1274,8 @@ wss.on('connection', (ws) => {
             const target = socketByUid(toUid);
             if (target) send(target, 'colony-gift-card', gift); // deliver now if online
             colonies.clearRequest(c, toUid); // request fulfilled
+            c.donatedBy = c.donatedBy || {}; // all-time per-member stat
+            c.donatedBy[ws.uid] = (c.donatedBy[ws.uid] || 0) + 1;
             await colonies.save(c);
             send(ws, 'colony-donate-ok', { toUid });
             pushColony(c);
