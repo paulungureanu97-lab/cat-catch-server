@@ -328,8 +328,11 @@ function finishTournament(t, finalFeud) {
   }
   if (first) t.rewards[first] = { ...REWARDS[1], place: 1 };
   if (second) t.rewards[second] = { ...REWARDS[2], place: 2 };
-  // remember the runner-up + finish time + FINAL SCORE for the war chronicle
-  t.second = second ? { colonyId: second, name: nameOf(t, second), emoji: emojiOf(t, second) } : null;
+  // remember the runner-up + finish time + FINAL SCORE for the war chronicle.
+  // ⚠️ chronicle = BRACKET truth: the runner-up is the colony that actually
+  // PLAYED the final (even a bot), NOT the reward-redirected place 2 — the
+  // stored score is the final's score, so the names must match the match.
+  t.second = loserId ? { colonyId: loserId, name: nameOf(t, loserId), emoji: emojiOf(t, loserId) } : null;
   t.finalScore = finalFeud
     ? { aId: finalFeud.aId, bId: finalFeud.bId, a: finalFeud.aScore | 0, b: finalFeud.bScore | 0 }
     : null;
