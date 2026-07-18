@@ -53,12 +53,20 @@ async function archive(t) {
   if (t.state === 'done') {
     await store.set(LAST, t);
     const hist = (await store.get(HIST)) || [];
+    // final score oriented winner-first ("5-3"), plus colony ids so the viewer
+    // can badge the row Won/Lost when THEIR colony was on the podium
+    let score = null;
+    if (t.finalScore && t.winner) {
+      const winnerIsA = t.finalScore.aId === t.winner.colonyId;
+      score = { w: winnerIsA ? t.finalScore.a : t.finalScore.b, l: winnerIsA ? t.finalScore.b : t.finalScore.a };
+    }
     hist.push({
       week: t.week,
       at: t.finishedAt || Date.now(),
       entrants: t.entrants.length,
-      winner: t.winner ? { name: t.winner.name, emoji: t.winner.emoji } : null,
-      second: t.second ? { name: t.second.name, emoji: t.second.emoji } : null,
+      winner: t.winner ? { colonyId: t.winner.colonyId, name: t.winner.name, emoji: t.winner.emoji } : null,
+      second: t.second ? { colonyId: t.second.colonyId, name: t.second.name, emoji: t.second.emoji } : null,
+      score,
     });
     while (hist.length > HIST_MAX) hist.shift();
     await store.set(HIST, hist);
@@ -320,8 +328,11 @@ function finishTournament(t, finalFeud) {
   }
   if (first) t.rewards[first] = { ...REWARDS[1], place: 1 };
   if (second) t.rewards[second] = { ...REWARDS[2], place: 2 };
-  // remember the runner-up + finish time for the war chronicle (history)
+  // remember the runner-up + finish time + FINAL SCORE for the war chronicle
   t.second = second ? { colonyId: second, name: nameOf(t, second), emoji: emojiOf(t, second) } : null;
+  t.finalScore = finalFeud
+    ? { aId: finalFeud.aId, bId: finalFeud.bId, a: finalFeud.aScore | 0, b: finalFeud.bScore | 0 }
+    : null;
   t.finishedAt = Date.now();
 
   // Permanent glory awards (aligned with the visible podium so the colony shown
