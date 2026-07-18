@@ -117,6 +117,9 @@ function contribute(c, uid, amount) {
   if (!c.members.some((m) => m.uid === uid)) return { error: 'not-member' };
   const amt = Math.max(1, Math.min(MAX_CONTRIB, amount | 0));
   c.bank += amt;
+  // all-time per-member stat (drives the colony Stats screen)
+  c.bankBy = c.bankBy || {};
+  c.bankBy[uid] = (c.bankBy[uid] || 0) + amt;
   return { ok: true, amount: amt, bank: c.bank };
 }
 /** A leader/elder spends the bank to level up a perk. */
