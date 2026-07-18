@@ -463,7 +463,11 @@ function sanitizeDeck(deck) {
       cost: (c && c.cost) | 0,
       power: (c && c.power) | 0,
       tribe: String((c && c.tribe) || '').slice(0, 24),
-      ability: String((c && c.ability) || '').slice(0, 48),
+      // 80, NOT 48: 8 of the game's 14 ability strings are 50-55 chars — a 48
+      // cap silently truncated them, so clients' applyReveal switch missed and
+      // enemy decks from the server (feud rosters, ghosts, profiles) played
+      // with those abilities as no-ops. Longest current string is 55.
+      ability: String((c && c.ability) || '').slice(0, 80),
       cutout: !!(c && c.cutout),
       gear: Array.isArray(c && c.gear) ? c.gear.slice(0, 3).map((g) => String(g).slice(0, 32)) : [],
     };
