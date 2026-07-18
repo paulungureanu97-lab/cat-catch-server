@@ -788,18 +788,31 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // Phase 3b: cache my village snapshot so friends can visit it read-only
+      // Phase 3b: cache my village snapshot so friends can visit it read-only.
+      // ALSO mirrored durably (`vil:<key>`) — the in-memory map dies on every
+      // deploy/spin-down, which made friends' villages "vanish" until they
+      // reconnected (reported as a cross-version bug, but it's restart loss).
       case 'village': {
         lbCheck(); // fire the weekly reset (which also clears the villages cache)
         if (ws.name) {
-          villages.set(keyOf(ws.name), { name: ws.name, ...sanitizeVillage(msg), at: Date.now() });
+          const snap = { name: ws.name, ...sanitizeVillage(msg), at: Date.now() };
+          villages.set(keyOf(ws.name), snap);
+          store.set(`vil:${keyOf(ws.name)}`, snap).catch(() => {});
         }
         break;
       }
       case 'village-view': {
-        const v = villages.get(keyOf(msg.name));
-        if (v) send(ws, 'village-data', { name: v.name, slots: v.slots, decor: v.decor });
-        else send(ws, 'village-data', { name: String(msg.name || '').slice(0, 20), empty: true });
+        (async () => {
+          const key = keyOf(msg.name);
+          let v = villages.get(key);
+          if (!v) {
+            // fall back to the durable snapshot (friend offline since a restart)
+            v = await store.get(`vil:${key}`).catch(() => null);
+            if (v) villages.set(key, v);
+          }
+          if (v) send(ws, 'village-data', { name: v.name, slots: v.slots, decor: v.decor });
+          else send(ws, 'village-data', { name: String(msg.name || '').slice(0, 20), empty: true });
+        })().catch(() => send(ws, 'village-data', { name: String(msg.name || '').slice(0, 20), empty: true }));
         break;
       }
 
@@ -839,8 +852,20 @@ wss.on('connection', (ws) => {
         // remembers them — they repopulate on their next connect)
         lbCheck();
         const e = lbScores.get(keyOf(msg.name));
-        if (e) send(ws, 'player-info', { found: true, ...e });
-        else send(ws, 'player-info', { found: false, name: msg.name });
+        if (e) {
+          send(ws, 'player-info', { found: true, ...e });
+          // deck photos are NOT persisted (restart strips them). If they're
+          // missing but the player is ONLINE, ask their client to re-push the
+          // score (with thumbnails) so the next open shows real previews.
+          // Old clients hit their default case and ignore this — harmless.
+          const noPhotos = Array.isArray(e.deck) && e.deck.length > 0 && !e.deck.some((c) => c && c.photo);
+          if (noPhotos) {
+            const target = clients.get(keyOf(msg.name));
+            if (target) send(target, 'score-refresh', {});
+          }
+        } else {
+          send(ws, 'player-info', { found: false, name: msg.name });
+        }
         break;
       }
 
