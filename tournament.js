@@ -14,6 +14,8 @@ const store = require('./store');
 
 const CUR = 'tour:cur';
 const LAST = 'tour:last';
+const HIST = 'tour:hist'; // slim summaries of past tournaments (the war chronicle)
+const HIST_MAX = 12;
 const MAX_ENTRANTS = 16;
 const MAX_ATTACKS = 2; // attacks per member per feud
 const DAY = 86400000; // a feud lasts at most 24h
@@ -43,22 +45,40 @@ function freshTournament(week) {
   };
 }
 
+/** Archive a tournament: keep the full object as LAST (claims stay valid from
+ * there), append a slim summary to the history chronicle when it finished, and
+ * drop its per-feud replay keys (replays only live as long as their war). */
+async function archive(t) {
+  if (!t) return;
+  if (t.state === 'done') {
+    await store.set(LAST, t);
+    const hist = (await store.get(HIST)) || [];
+    hist.push({
+      week: t.week,
+      at: t.finishedAt || Date.now(),
+      entrants: t.entrants.length,
+      winner: t.winner ? { name: t.winner.name, emoji: t.winner.emoji } : null,
+      second: t.second ? { name: t.second.name, emoji: t.second.emoji } : null,
+    });
+    while (hist.length > HIST_MAX) hist.shift();
+    await store.set(HIST, hist);
+  }
+  if (t.feuds) {
+    for (const fid of Object.keys(t.feuds)) {
+      try {
+        await store.del(`replays:${t.week}:${fid}`);
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  }
+}
+
 async function current() {
   const wk = weekId();
   let t = await store.get(CUR);
   if (!t || t.week !== wk) {
-    if (t && t.state === 'done') await store.set(LAST, t);
-    // battle replays only live for the week they were played — drop the
-    // archived week's per-feud replay keys so durable storage can't accumulate
-    if (t && t.feuds) {
-      for (const fid of Object.keys(t.feuds)) {
-        try {
-          await store.del(`replays:${t.week}:${fid}`);
-        } catch {
-          /* best-effort cleanup */
-        }
-      }
-    }
+    if (t) await archive(t);
     t = freshTournament(wk);
     await store.set(CUR, t);
   }
@@ -66,6 +86,22 @@ async function current() {
 }
 const last = () => store.get(LAST);
 const save = (t) => store.set(CUR, t);
+const saveLast = (t) => store.set(LAST, t);
+const history = () => store.get(HIST);
+
+/** Roll a fresh tournament as soon as the last one is DONE — no waiting for the
+ * Monday flip. The done tournament is archived first, so unclaimed rewards stay
+ * claimable from LAST. (Glory stays capped by the per-week dedupe in index.js's
+ * applyGlory — rapid re-tournaments can't farm titles.) */
+async function startNew(t) {
+  if (!t || t.state !== 'done') {
+    return { error: t && t.state === 'running' ? 'running' : 'not-done' };
+  }
+  await archive(t);
+  const fresh = freshTournament(weekId());
+  await store.set(CUR, fresh);
+  return { ok: true, tournament: fresh };
+}
 
 function join(t, entrant) {
   if (t.state !== 'open') return { error: 'closed' };
@@ -284,6 +320,9 @@ function finishTournament(t, finalFeud) {
   }
   if (first) t.rewards[first] = { ...REWARDS[1], place: 1 };
   if (second) t.rewards[second] = { ...REWARDS[2], place: 2 };
+  // remember the runner-up + finish time for the war chronicle (history)
+  t.second = second ? { colonyId: second, name: nameOf(t, second), emoji: emojiOf(t, second) } : null;
+  t.finishedAt = Date.now();
 
   // Permanent glory awards (aligned with the visible podium so the colony shown
   // as place 1 also earns the championship title). Applied ONCE by index.js —
@@ -482,4 +521,4 @@ function tickBots(t, now, rng) {
   return { activated: [...new Set(activated)], changed: any };
 }
 
-module.exports = { current, last, save, join, start, tick, tickBots, isBot, attack, claim, weekId, MAX_ENTRANTS, MAX_ATTACKS, DAY, REWARDS };
+module.exports = { current, last, save, saveLast, join, start, startNew, history, tick, tickBots, isBot, attack, claim, weekId, MAX_ENTRANTS, MAX_ATTACKS, DAY, REWARDS };
