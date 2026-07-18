@@ -1476,13 +1476,55 @@ wss.on('connection', (ws) => {
           const gloried = await applyGlory(t); // done tournament → credit glory before claim
           const r = tournament.claim(t, c.id, ws.uid);
           if (r.error) {
+            // the reward may live in the ARCHIVED tournament — a new war was
+            // started before this member claimed. Claims stay valid from LAST.
+            const lastT = await tournament.last();
+            const lr = lastT ? tournament.claim(lastT, c.id, ws.uid) : { error: r.error };
             if (pre.activated.length || pre.changed || gloried) await tournament.save(t);
+            if (!lr.error) {
+              await tournament.saveLast(lastT);
+              send(ws, 'tour-reward', { coins: lr.reward.coins, xp: lr.reward.xp, place: lr.reward.place });
+              return send(ws, 'tour-info', { tournament: t, last: lastT, maxAttacks: tournament.MAX_ATTACKS });
+            }
             return send(ws, 'tour-error', { reason: r.error });
           }
           await tournament.save(t);
           send(ws, 'tour-reward', { coins: r.reward.coins, xp: r.reward.xp, place: r.reward.place });
           send(ws, 'tour-info', { tournament: t, maxAttacks: tournament.MAX_ATTACKS });
         }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
+        break;
+      }
+
+      case 'tour-new': {
+        // roll a fresh tournament as soon as the last one is DONE (no waiting
+        // for the Monday flip). Leader/elder only; the done tournament is
+        // archived first so its unclaimed rewards stay claimable.
+        withTourLock(async () => {
+          if (!ws.uid) return send(ws, 'tour-error', { reason: 'no-uid' });
+          const c = await colonies.myColony(ws.uid);
+          if (!c) return send(ws, 'tour-error', { reason: 'not-in' });
+          if (!colonies.canManage(c, ws.uid)) return send(ws, 'tour-error', { reason: 'auth' });
+          const t = await tournament.current();
+          tournament.tickBots(t, Date.now()); // settle a final that expired unseen
+          await applyGlory(t); // credit permanent prestige before archiving
+          const r = await tournament.startNew(t);
+          if (r.error) {
+            await tournament.save(t); // keep any tick/glory mutations
+            return send(ws, 'tour-error', { reason: r.error });
+          }
+          const lt = await tournament.last();
+          send(ws, 'tour-info', { tournament: r.tournament, last: lt || null, maxAttacks: tournament.MAX_ATTACKS });
+          await pushTournament(r.tournament); // online members see the fresh board
+        }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
+        break;
+      }
+
+      case 'tour-history': {
+        // the war chronicle: slim summaries of past tournaments, newest first
+        (async () => {
+          const items = (await tournament.history()) || [];
+          send(ws, 'tour-history', { items: items.slice().reverse() });
+        })().catch(() => send(ws, 'tour-history', { items: [] }));
         break;
       }
 
