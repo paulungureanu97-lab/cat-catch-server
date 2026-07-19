@@ -488,7 +488,7 @@ const lbScores = new Map(); // keyOf(name) -> { name, uid, trophies, cats, deck,
 // push — a friend can then VIEW it read-only). Slim: no photos, just plots+decor.
 const villages = new Map(); // keyOf(name) -> { name, slots, decor, at }
 const VALID_DECOR = new Set(['flowers', 'tree2', 'lantern', 'banner', 'fountain', 'torch', 'statue', 'rainbow', 'crown']);
-const VALID_BUILDING = new Set(['den', 'tree', 'milk', 'fish', 'train', 'tower']);
+const VALID_BUILDING = new Set(['den', 'tree', 'milk', 'fish', 'train', 'tower', 'mercato', 'laboratorio']);
 function sanitizeVillage(msg) {
   const slots = Array.isArray(msg.slots)
     ? msg.slots
