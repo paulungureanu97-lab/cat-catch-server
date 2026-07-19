@@ -11,6 +11,7 @@
 // leaderboard decks; this module is pure logic (time is injected) so it unit-tests
 // without a server.
 const store = require('./store');
+const botReplay = require('./botReplay');
 
 const CUR = 'tour:cur';
 const LAST = 'tour:last';
@@ -48,9 +49,48 @@ function freshTournament(week) {
 /** Archive a tournament: keep the full object as LAST (claims stay valid from
  * there), append a slim summary to the history chronicle when it finished, and
  * drop its per-feud replay keys (replays only live as long as their war). */
+// 1.70.0 — the single-slot archive (tour:last) gets OVERWRITTEN on the next
+// archive, and with same-week "Nuovo torneo" wars can stack: any reward still
+// unclaimed in the old slot would become unreachable forever. Before we
+// overwrite, the salvage hook (set by index.js) deposits those rewards into
+// durable per-player mailboxes, delivered automatically at the next login.
+let salvageHook = null;
+function setSalvageHook(fn) {
+  salvageHook = fn;
+}
+
+async function salvageOldLast(t) {
+  if (!salvageHook) return;
+  try {
+    const prev = await store.get(LAST);
+    if (!prev || !prev.rewards) return;
+    // identity guard: never salvage the very object we are about to write
+    // (a double-archive of the same war would re-deposit claimable rewards)
+    if (prev.week === t.week && prev.startedAt === t.startedAt && prev.finishedAt === t.finishedAt) return;
+    const claimed = Array.isArray(prev.claimedBy) ? prev.claimedBy : [];
+    const entries = [];
+    const seen = new Set(); // live claim() pays each uid at most ONCE — mirror
+    // that here: a uid snapshotted in BOTH podium rosters (hopped colonies
+    // mid-week) must not be double-deposited
+    for (const cid of Object.keys(prev.rewards)) {
+      const rw = prev.rewards[cid] || {};
+      for (const m of (prev.rosters && prev.rosters[cid]) || []) {
+        if (!m || typeof m.uid !== 'string' || isBot(m.uid) || m.bot) continue;
+        if (claimed.includes(m.uid) || seen.has(m.uid)) continue;
+        seen.add(m.uid);
+        entries.push({ uid: m.uid, coins: rw.coins | 0, xp: rw.xp | 0, place: rw.place | 0, week: prev.week });
+      }
+    }
+    if (entries.length) await salvageHook(entries);
+  } catch {
+    /* best-effort: a failed salvage must never block archiving */
+  }
+}
+
 async function archive(t) {
   if (!t) return;
   if (t.state === 'done') {
+    await salvageOldLast(t);
     await store.set(LAST, t);
     const hist = (await store.get(HIST)) || [];
     // final score oriented winner-first ("5-3"), plus colony ids so the viewer
@@ -302,21 +342,31 @@ function finishTournament(t, finalFeud) {
   // bots can't claim, so a bot on the podium would LOCK that reward away —
   // redirect podium places to the best-placed REAL colonies (bracket/winner
   // still show the truth; only the claimable rewards move).
+  // ⚠️ ANTI-FARM (1.70.0): a podium slot a BOT vacated is inherited only by a
+  // real colony that WON at least one feud this war. Without this, a solo
+  // colony could deliberately LOSE to the bots ("Nuovo torneo" loops) and
+  // still pocket the full place-1 redirect for zero victories. Slots earned
+  // vs REAL opponents are untouched.
+  const wonAFeud = (cid) => Object.keys(t.feuds).some((fid) => t.feuds[fid] && t.feuds[fid].winnerId === cid);
   let first = champId && !isBot(champId) ? champId : null;
   let second = loserId && !isBot(loserId) ? loserId : null;
+  // real finalist beaten by a bot champion: the whole podium is bot-vacated —
+  // both the promotion AND the place-2 consolation require a real feud win
+  if (!first && second && !wonAFeud(second)) second = null;
   if (!first && second) {
     first = second; // real finalist beaten by a bot champion -> takes place 1
     second = null;
   }
   if (!first || !second) {
     // fill remaining podium spots with the real colonies eliminated deepest
+    // (these are all bot-vacated slots -> the feud-win gate applies)
     const placed = new Set([first, second].filter(Boolean));
     outer: for (let r = t.rounds.length - 1; r >= 0; r--) {
       for (const fid of t.rounds[r]) {
         const f = t.feuds[fid];
         if (!f) continue;
         for (const cid of [f.aId, f.bId]) {
-          if (cid && !isBot(cid) && !placed.has(cid)) {
+          if (cid && !isBot(cid) && !placed.has(cid) && wonAFeud(cid)) {
             if (!first) first = cid;
             else if (!second) second = cid;
             placed.add(cid);
@@ -453,6 +503,7 @@ function tickBots(t, now, rng) {
   if (t.state !== 'running') return { activated: [], changed: false };
   const r = typeof rng === 'function' ? rng : Math.random;
   const activated = [];
+  const replays = []; // bot-attack footage for the caller to persist (ring keys)
   let any = false;
   let changed = true;
   let guard = 0;
@@ -497,7 +548,20 @@ function tickBots(t, now, rng) {
           f.attacks[m.uid] = (f.attacks[m.uid] || 0) + 1;
           const win = r() < p;
           const opp = oppRoster.length ? oppRoster[Math.floor(r() * oppRoster.length)] : null;
-          f.log.push({ colonyId: cid, byUid: m.uid, byName: m.name, oppName: opp ? opp.name : '—', win, lanes: win ? 2 : 1, at: now, bot: true });
+          const entry = { colonyId: cid, byUid: m.uid, byName: m.name, oppName: opp ? opp.name : '—', win, lanes: win ? 2 : 1, at: now, bot: true };
+          // 1.70.0 — watchable footage: when the defender is REAL, actually
+          // simulate the battle (outcome-matched to the credited roll) so the
+          // war log's ▶ Replay works on bot attacks too. The caller persists
+          // `replays` to the per-feud ring BEFORE saving the tournament.
+          if (opp && !isBot(oppId) && Array.isArray(opp.deck) && opp.deck.length && Array.isArray(m.deck) && m.deck.length) {
+            const rep = botReplay.buildBotReplay(m.name, opp.name, m.deck, opp.deck, win, r, Math.floor(r() * 1e9), now);
+            if (rep) {
+              entry.lanes = rep.lanes; // keep the log's lane count coherent with the footage
+              entry.replayId = `${m.uid}-${now}-${done}`;
+              replays.push({ week: t.week, feudId: id, id: entry.replayId, data: rep.data });
+            }
+          }
+          f.log.push(entry);
           if (f.log.length > 200) f.log.shift();
           if (win) {
             if (cid === f.aId) f.aScore += 1;
@@ -532,7 +596,7 @@ function tickBots(t, now, rng) {
       any = true;
     }
   }
-  return { activated: [...new Set(activated)], changed: any };
+  return { activated: [...new Set(activated)], changed: any, replays };
 }
 
-module.exports = { current, last, save, saveLast, join, start, startNew, history, tick, tickBots, isBot, attack, claim, weekId, MAX_ENTRANTS, MAX_ATTACKS, DAY, REWARDS };
+module.exports = { current, last, save, saveLast, join, start, startNew, history, tick, tickBots, isBot, attack, claim, weekId, setSalvageHook, MAX_ENTRANTS, MAX_ATTACKS, DAY, REWARDS };
