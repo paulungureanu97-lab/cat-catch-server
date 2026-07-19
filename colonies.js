@@ -282,7 +282,7 @@ async function create(uid, playerName, playerAvatar, { name, emoji, bio, max }) 
   const colony = {
     id,
     name: nm,
-    emoji: clean(emoji, 4) || '🐾',
+    emoji: clean(emoji, 8) || '🐾', // 8 units: ZWJ emoji (🐈‍⬛) survive intact
     bio: clean(bio, 120),
     max: clampMax(max),
     createdAt: Date.now(),
