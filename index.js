@@ -173,16 +173,57 @@ function withMailLock(fn) {
   return run;
 }
 
-/** (Re)deliver a player's buffered card gifts on connect. Does NOT clear them —
- * each gift is removed only when the recipient ACKs it (gift-ack), so a dropped
- * frame / ghost socket just means it's redelivered next time (never lost). */
+/** (Re)deliver a player's buffered mail on connect.
+ * - CARD GIFTS stay in the box until the recipient ACKs (gift-ack): a dropped
+ *   frame / ghost socket just means redelivery next time (never lost).
+ * - SALVAGED TOURNAMENT REWARDS (kind:'reward', deposited when an unclaimed
+ *   war is about to be overwritten in tour:last) auto-credit as 'tour-reward'
+ *   and DRAIN on send — old clients never ack, so keeping them would re-credit
+ *   coins on every login (a farm). The rare dead-socket loss is the lesser evil. */
 async function deliverMail(ws) {
   if (!ws.uid) return;
   await withMailLock(async () => {
+    // the mail lock is a global chain — by the time our turn comes the socket
+    // may already be CLOSED (send() no-ops silently). Draining a reward into a
+    // dead socket would delete it unread, so hold everything for next login.
+    if (ws.readyState !== 1 /* OPEN */) return;
     const box = (await store.get(mailKey(ws.uid))) || [];
-    for (const item of box) send(ws, 'colony-gift-card', item);
+    if (!box.length) return;
+    const keep = [];
+    for (const item of box) {
+      if (item && item.kind === 'reward') {
+        send(ws, 'tour-reward', { coins: item.coins | 0, xp: item.xp | 0, place: item.place | 0 });
+      } else {
+        send(ws, 'colony-gift-card', item);
+        keep.push(item);
+      }
+    }
+    if (keep.length !== box.length) await store.set(mailKey(ws.uid), keep);
   });
 }
+
+// deposit unclaimed rewards of an about-to-be-overwritten archived war into the
+// per-player mailboxes (see tournament.js salvageOldLast). Never evicts a card
+// gift: when the box is full we drop the OLDEST salvaged reward instead.
+tournament.setSalvageHook(async (entries) => {
+  for (const e of entries) {
+    if (!e || typeof e.uid !== 'string' || !e.uid || e.uid.startsWith('bot:')) continue;
+    await withMailLock(async () => {
+      const key = mailKey(e.uid);
+      const box = (await store.get(key)) || [];
+      box.push({ kind: 'reward', coins: e.coins | 0, xp: e.xp | 0, place: e.place | 0, week: String(e.week || ''), at: Date.now() });
+      while (box.length > MAIL_MAX) {
+        const idx = box.findIndex((it) => it && it.kind === 'reward');
+        if (idx < 0) {
+          box.pop(); // box full of gifts: sacrifice the reward, never a gift
+          break;
+        }
+        box.splice(idx, 1);
+      }
+      await store.set(key, box);
+    });
+  }
+});
 
 // ---- Chat: colony broadcast + friend DMs, with a small durable ring buffer ----
 // Lazy in-memory cache (loaded from store on first access), capped per thread and
@@ -283,11 +324,33 @@ async function pushTournament(t) {
 // replay them identically. Stored OUTSIDE the tournament object (which must stay
 // small for the single durable key) in per-feud ring keys, capped, and dropped
 // at the weekly rollover (see tournament.current()).
-const REPLAYS_PER_FEUD = 10; // ring: newest wins
+// 40, not 10: since 1.70.0 BOT attacks carry simulated footage too, and a
+// real-vs-real feud between mid-sized colonies can log 20+ real attacks plus
+// bot footage — a small ring evicted early replays mid-war (dangling ▶ buttons).
+// 40 × ~7KB ≈ 280KB per ring key, safely under Upstash's 1MB/request.
+const REPLAYS_PER_FEUD = 40; // ring: newest wins
 const REPLAY_MAX_BYTES = 30000;
 const REPLAY_TTL_S = 8 * 86400; // 8 days — outlives one week; a backstop so an
 // orphaned ring self-expires even if the weekly-rollover cleanup del is missed
 const replayKey = (week, feudId) => `replays:${week}:${feudId}`;
+
+/** Persist the simulated-footage replays tickBots generated for bot attacks
+ * (call BEFORE tournament.save so the log's replayIds point at stored data).
+ * Best-effort per entry: a store failure loses footage, never the war point. */
+async function storeBotReplays(replays) {
+  if (!Array.isArray(replays) || !replays.length) return;
+  for (const rep of replays) {
+    try {
+      const key = replayKey(rep.week, rep.feudId);
+      const ring = (await store.get(key)) || [];
+      ring.push({ id: rep.id, data: rep.data });
+      while (ring.length > REPLAYS_PER_FEUD) ring.shift();
+      await store.set(key, ring, REPLAY_TTL_S);
+    } catch {
+      /* footage lost, attack stands */
+    }
+  }
+}
 
 /** Whitelist-copy an incoming replay (untrusted, from a client). Returns null if
  * the shape is wrong or it exceeds the size cap. */
@@ -436,7 +499,10 @@ function sanitizeVillage(msg) {
   const decor = Array.isArray(msg.decor)
     ? [...new Set(msg.decor.filter((d) => VALID_DECOR.has(d)))].slice(0, 9)
     : [];
-  return { slots, decor };
+  // the owner's COLONY emblem (1.70.0) — so a visited village's clan banner
+  // shows the right emoji (8 UTF-16 units: room for ZWJ sequences)
+  const emoji = String(msg.emoji || '').trim().slice(0, 8);
+  return { slots, decor, emoji };
 }
 function lbCheck() {
   const wk = weekKey();
@@ -814,7 +880,7 @@ wss.on('connection', (ws) => {
             v = await store.get(`vil:${key}`).catch(() => null);
             if (v) villages.set(key, v);
           }
-          if (v) send(ws, 'village-data', { name: v.name, slots: v.slots, decor: v.decor });
+          if (v) send(ws, 'village-data', { name: v.name, slots: v.slots, decor: v.decor, emoji: v.emoji || '' });
           else send(ws, 'village-data', { name: String(msg.name || '').slice(0, 20), empty: true });
         })().catch(() => send(ws, 'village-data', { name: String(msg.name || '').slice(0, 20), empty: true }));
         break;
@@ -1295,7 +1361,7 @@ wss.on('connection', (ws) => {
           await withColonyLock(cid, async () => {
             const c = await colonies.get(cid);
             if (!c || !colonies.isLeader(c, ws.uid)) return send(ws, 'colony-error', { reason: 'auth' });
-            if (msg.emoji != null) c.emoji = colonies.clean(msg.emoji, 4) || c.emoji;
+            if (msg.emoji != null) c.emoji = colonies.clean(msg.emoji, 8) || c.emoji;
             if (msg.bio != null) c.bio = colonies.clean(msg.bio, 120);
             if (msg.max != null) c.max = Math.max(c.members.length, colonies.clampMax(msg.max));
             await colonies.save(c);
@@ -1375,7 +1441,8 @@ wss.on('connection', (ws) => {
           // tickBots is the single driver: it simulates bot attacks BEFORE
           // resolving deadlines (a bare tick() first would settle a bot feud
           // 0-0 by seed) and runs tick() internally, returning its activations.
-          const { activated, changed } = tournament.tickBots(t, now);
+          const { activated, changed, replays } = tournament.tickBots(t, now);
+          await storeBotReplays(replays); // bot-attack footage → per-feud ring
           // credit permanent glory if this read is the one that observed the
           // finish (self-heals a finished-but-uncredited tournament too)
           const gloried = await applyGlory(t);
@@ -1414,13 +1481,16 @@ wss.on('connection', (ws) => {
           if (!c || !colonies.canManage(c, ws.uid)) return send(ws, 'tour-error', { reason: 'auth' });
           const t = await tournament.current();
           if (!t.entrants.some((e) => e.colonyId === c.id)) return send(ws, 'tour-error', { reason: 'not-entrant' });
-          // top the field up to a power-of-two with BOT colonies (no byes) so a
-          // war can run even with 1 real colony — see bots.js
-          bots.padWithBots(t);
+          // top the field up with BOT colonies (no byes) so a war can run even
+          // with 1 real colony — 1.70.0: a FULL 16-bracket by default (a living
+          // world of rival clans; bot-vs-bot feuds fast-forward instantly).
+          // BOT_FIELD env overrides for tests/tuning.
+          bots.padWithBots(t, undefined, process.env.BOT_FIELD ? Math.max(2, Number(process.env.BOT_FIELD) | 0) : undefined);
           const now = Date.now();
           const r = tournament.start(t, now);
           if (r.error) return send(ws, 'tour-error', { reason: r.error });
           const bot = tournament.tickBots(t, now); // resolve any bot-vs-bot round-0 feuds at once
+          await storeBotReplays(bot.replays);
           await tournament.save(t);
           await pushFeudStart(t, [...(r.activated || []), ...bot.activated]);
           await pushTournament(t);
@@ -1438,6 +1508,7 @@ wss.on('connection', (ws) => {
           // resolve any expiry FIRST (bot-aware: simulates bot scores before
           // settling deadlines) so a post-deadline attack is refused cleanly
           const pre = tournament.tickBots(t, now);
+          await storeBotReplays(pre.replays);
           const feudId = String(msg.feudId || '');
           // stash the attacker's battle replay (optional, size-capped) BEFORE the
           // attack, so its log entry only references a replayId that was ACTUALLY
@@ -1472,6 +1543,7 @@ wss.on('connection', (ws) => {
           // advance the bot side too (and fast-forward + resolve if this attack
           // exhausted the human side's attacks)
           const post = tournament.tickBots(t, now);
+          await storeBotReplays(post.replays);
           await applyGlory(t); // if this attack resolved the final, credit glory now
           await tournament.save(t);
           await pushFeudStart(t, [...pre.activated, ...(r.activated || []), ...post.activated]);
@@ -1504,13 +1576,19 @@ wss.on('connection', (ws) => {
           // may have expired since the last read, and a plain tick would hand a
           // bot feud a 0-0 seed win before the bot ever scored
           const pre = tournament.tickBots(t, nowC);
+          await storeBotReplays(pre.replays);
           const gloried = await applyGlory(t); // done tournament → credit glory before claim
           const r = tournament.claim(t, c.id, ws.uid);
+          // ⚠️ never treat CUR and LAST as two claimable wars when they are the
+          // SAME object (a partial archive failure can leave tour:last = tour:cur;
+          // draining "both" would mint the reward twice)
+          const sameWar = (a, b) =>
+            !!a && !!b && a.week === b.week && a.startedAt === b.startedAt && a.finishedAt === b.finishedAt;
           if (r.error) {
             // the reward may live in the ARCHIVED tournament — a new war was
             // started before this member claimed. Claims stay valid from LAST.
             const lastT = await tournament.last();
-            const lr = lastT ? tournament.claim(lastT, c.id, ws.uid) : { error: r.error };
+            const lr = lastT && !sameWar(lastT, t) ? tournament.claim(lastT, c.id, ws.uid) : { error: r.error };
             if (pre.activated.length || pre.changed || gloried) await tournament.save(t);
             if (!lr.error) {
               await tournament.saveLast(lastT);
@@ -1521,6 +1599,20 @@ wss.on('connection', (ws) => {
           }
           await tournament.save(t);
           send(ws, 'tour-reward', { coins: r.reward.coins, xp: r.reward.xp, place: r.reward.place });
+          // ALSO drain the ARCHIVED war's reward in the same tap — claiming the
+          // current war used to shadow it (the fallback only ran on error), so
+          // it sat in the single-slot archive until the next war overwrote it
+          try {
+            const lastT = await tournament.last();
+            const lr = lastT && !sameWar(lastT, t) ? tournament.claim(lastT, c.id, ws.uid) : { error: 'none' };
+            if (!lr.error) {
+              await tournament.saveLast(lastT);
+              send(ws, 'tour-reward', { coins: lr.reward.coins, xp: lr.reward.xp, place: lr.reward.place });
+              return send(ws, 'tour-info', { tournament: t, last: lastT, maxAttacks: tournament.MAX_ATTACKS });
+            }
+          } catch {
+            /* archive drain is best-effort — salvage-at-overwrite still catches it */
+          }
           send(ws, 'tour-info', { tournament: t, maxAttacks: tournament.MAX_ATTACKS });
         }).catch(() => send(ws, 'tour-error', { reason: 'error' }));
         break;
@@ -1536,7 +1628,8 @@ wss.on('connection', (ws) => {
           if (!c) return send(ws, 'tour-error', { reason: 'not-in' });
           if (!colonies.canManage(c, ws.uid)) return send(ws, 'tour-error', { reason: 'auth' });
           const t = await tournament.current();
-          tournament.tickBots(t, Date.now()); // settle a final that expired unseen
+          const settled = tournament.tickBots(t, Date.now()); // settle a final that expired unseen
+          await storeBotReplays(settled.replays);
           await applyGlory(t); // credit permanent prestige before archiving
           const r = await tournament.startNew(t);
           if (r.error) {
