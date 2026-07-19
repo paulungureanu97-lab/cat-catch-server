@@ -29,18 +29,27 @@ const ABILITIES = [
 const RARITIES = ['common', 'uncommon', 'rare', 'epic', 'mythic'];
 const DECK_SIZE = 12;
 
-// themed pools so a bot colony reads like a real rival clan
+// themed pools so a bot colony reads like a real rival clan (26 identities —
+// enough for a full 16-bracket without repeats, with variety week to week)
 const COLONY_NAMES = [
   'Artigli Selvatici', "Branco d'Ombra", 'Zanne di Luna', 'Clan Rissa', 'Furie Randagie',
   'Vecchi Mici', 'Guardia Notturna', 'Predoni Felini', 'Baffi di Ferro', 'Ombre Feroci',
   'Gatti di Strada', 'Legione Micia', 'Grinfie Rosse', 'Spettri Pelosi', 'Tigri di Vicolo',
   'Cuccioli Ribelli',
+  // 1.70.0 — 10 more rival clans so brackets feel like a living world
+  'Sette Vite', 'Corte dei Randagi', 'Fauci del Tramonto', 'Micio Vendicatori',
+  'Artiglio Dorato', 'Branco della Nebbia', 'Sentinelle del Tetto', 'Croccantini Cattivi',
+  'Dinastia Soriana', 'Ultimi Graffi',
 ];
-const COLONY_EMOJIS = ['😼', '🐾', '🦁', '🐆', '🐈‍⬛', '⚔️', '🔥', '🌑', '🗡️', '🐅', '💥', '🏴'];
+const COLONY_EMOJIS = ['😼', '🐾', '🦁', '🐆', '🐈‍⬛', '⚔️', '🔥', '🌑', '🗡️', '🐅', '💥', '🏴', '🌙', '👺', '🌋', '🛡️', '🏆', '🌫️', '🏙️', '😾', '👑', '🪓'];
 const MEMBER_NAMES = [
   'Grinza', 'Zanna', 'Artiglio', 'Fumo', 'Brace', 'Cenere', 'Ombra', 'Ringhio',
   'Baffo', 'Scheggia', 'Furia', 'Notte', 'Lampo', 'Tuono', 'Rombo', 'Graffio',
+  'Sibilo', 'Vespro', 'Ruggine', 'Tempesta', 'Spina', 'Gelo', 'Vampa', 'Randagio',
 ];
+// per-colony personality: some clans are pushovers, some are terrors — a flat
+// multiplier on the field's average card power (index-stable within a week)
+const STRENGTH_PERSONALITY = [1.0, 0.85, 1.12, 0.92, 1.05, 0.8, 1.18, 0.95, 1.08, 0.88, 1.15, 0.9, 1.02, 0.82, 1.1, 0.97];
 
 function nextPow2(n) {
   let p = 1;
@@ -79,9 +88,11 @@ function makeDeck(level, rng) {
 function makeBotColony(week, index, opts, rng) {
   const r = typeof rng === 'function' ? rng : Math.random;
   const o = opts || {};
-  const level = Math.max(3, Math.round(o.level || 9));
-  const trophies = Math.max(0, Math.round((o.trophies || 0) + (r() * 120 - 60)));
-  const members = 2 + Math.floor(r() * 2); // 2 or 3 members (keeps attack capacity fair)
+  // personality multiplier → easy prey AND scary contenders in the same bracket
+  const personality = STRENGTH_PERSONALITY[index % STRENGTH_PERSONALITY.length];
+  const level = Math.max(3, Math.round((o.level || 9) * personality));
+  const trophies = Math.max(0, Math.round(((o.trophies || 0) + (r() * 240 - 120)) * personality));
+  const members = 2 + Math.floor(r() * 3); // 2-4 members (capacity still capped in feuds)
   const roster = [];
   for (let i = 0; i < members; i++) {
     roster.push({
@@ -110,12 +121,17 @@ function makeBotColony(week, index, opts, rng) {
  * Bots are scaled to the real field's median trophies + average card power so the
  * bracket stays fair. Returns the number of bots added. Never creates a pure-bot
  * tournament (needs >= 1 real colony). */
-function padWithBots(t, rng) {
+function padWithBots(t, rng, minField) {
   const r = typeof rng === 'function' ? rng : Math.random;
   const reals = t.entrants.filter((e) => !isBot(e.colonyId));
   if (reals.length === 0) return 0;
   const existingBots = t.entrants.filter((e) => isBot(e.colonyId)).length;
-  const field = Math.min(16, nextPow2(Math.max(2, reals.length)));
+  // 1.70.0: the live server pads to a FULL 16-bracket (4 rounds, ~15 rival
+  // clans with 1 real colony) so wars feel like a living world — bot-vs-bot
+  // feuds fast-forward instantly, the real colony fights one feud per round.
+  // Tests pass a small minField to keep their tight fixtures.
+  const floor = Math.max(2, minField == null ? 16 : minField | 0);
+  const field = Math.min(16, Math.max(nextPow2(Math.max(2, reals.length)), floor));
   const need = Math.max(0, field - reals.length - existingBots);
   if (need <= 0) return 0;
 
