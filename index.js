@@ -493,7 +493,7 @@ function sanitizeVillage(msg) {
   const slots = Array.isArray(msg.slots)
     ? msg.slots
         .filter((s) => s && VALID_BUILDING.has(s.b) && typeof s.id === 'string')
-        .slice(0, 6)
+        .slice(0, 8) // 8 since 1.72.0 (mercato+laboratorio) — 6 truncated them
         .map((s) => ({ id: String(s.id).slice(0, 8), b: s.b, lv: Math.min(10, Math.max(1, s.lv | 0)) }))
     : [];
   const decor = Array.isArray(msg.decor)
